@@ -5,4 +5,5 @@ logs/*
 BasicCNN*
 
 getTrainData.py
+
 log.txt
