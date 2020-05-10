@@ -2,6 +2,7 @@ import os
 
 try:
     with open('log.txt', 'r') as file:
+        os.system('cls')
         wins = 0
         losses = 0
         total = 0

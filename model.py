@@ -77,7 +77,7 @@ def check_data():
 # that you want to further train:
 #keras.models.load_model(filepath)
 
-hm_epochs = 30
+hm_epochs = 50
 
 for i in range(hm_epochs):
     current = 0

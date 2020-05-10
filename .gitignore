@@ -1,9 +1,11 @@
+# My training data!
 train_data/*
 
+# logs for tensorflow
 logs/*
 
+# Models should dont go to github
 BasicCNN*
 
-getTrainData.py
-
+# Winrate logs dont go to github
 log.txt
