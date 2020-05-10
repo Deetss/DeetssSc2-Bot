@@ -50,6 +50,8 @@ tensorboard = TensorBoard(log_dir="./logs/stage1")
 
 train_data_dir = ".\\train_data"
 
+#filepath = ".\\BasicCNN-10-epochs-0.0001-LR-STAGE1"
+
 all_files = os.listdir(train_data_dir)
 
 def check_data():
@@ -68,12 +70,12 @@ def check_data():
         total_data += len(choices[choice])
         lengths.append(len(choices[choice]))
 
-        print("Total data length now is:\n", total_data)
-        return lengths
+    print("Total data length now is:\n", total_data)
+    return lengths
 
 # if you want to load in a previously trained model
 # that you want to further train:
-# keras.models.load_model(filepath)
+keras.models.load_model(filepath)
 hm_epochs = 10
 
 for i in range(hm_epochs):
@@ -126,7 +128,7 @@ for i in range(hm_epochs):
 
         train_data = no_attacks + attack_closest_to_hatch + attack_enemy_structures + attack_enemy_start
         random.shuffle(train_data)
-        print("Total Training Data: {}".format(len(train_data))
+        print("Total Training Data: {}".format(len(train_data)))
 
         test_size = 100
         batch_size = 128
