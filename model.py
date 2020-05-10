@@ -75,12 +75,13 @@ def check_data():
 
 # if you want to load in a previously trained model
 # that you want to further train:
-keras.models.load_model(filepath)
-hm_epochs = 10
+#keras.models.load_model(filepath)
+
+hm_epochs = 30
 
 for i in range(hm_epochs):
     current = 0
-    increment = 70
+    increment = 200
     not_maximum = True
 
     

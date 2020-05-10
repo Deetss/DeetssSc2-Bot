@@ -23,7 +23,6 @@ if USE_MODEL:
 class DeetssBot(sc2.BotAI):
     def __init__(self):
         self.buildStuffInverval = 2
-        self.ITERATIONS_PER_MINUTE = 165
         self.MAX_WORKERS = 55
         self.do_something_after = 0
         self.exactExpansionLocations = []
@@ -34,14 +33,13 @@ class DeetssBot(sc2.BotAI):
             if self.use_model:            
                 print("USING MODEL!!")
                 self.model = keras.models.load_model(
-                    "BasicCNN-10-epochs-0.0001-LR-STAGE1")
+                    "BasicCNN-30-epochs-0.0001-LR-STAGE1")
         except OSError:
             print(OSError)
             print("\nMaybe you need to train a model first")
 
     async def on_step(self, iteration):
         # do this every step
-        self.iteration = iteration
         self.currentDroneCountIncludingPending = self.units(DRONE).amount + self.already_pending(
             DRONE) + self.units(EXTRACTOR).ready.filter(lambda x: x.vespene_contents > 0).amount
 
@@ -86,8 +84,8 @@ class DeetssBot(sc2.BotAI):
         x = enemy_start_location[0]
         y = enemy_start_location[1]
 
-        x += ((random.randrange(-20, 20))/100) * enemy_start_location[0]
-        y += ((random.randrange(-20, 20))/100) * enemy_start_location[1]
+        x += ((random.randrange(-20, 20))/100) * self.game_info.map_size[0]
+        y += ((random.randrange(-20, 20))/100) * self.game_info.map_size[1]
 
         if x < 0:
             x = 0
@@ -134,17 +132,20 @@ class DeetssBot(sc2.BotAI):
             self.larva.random.train(OVERLORD)
 
     async def expand(self):
-        if self.supply_used >= 17 and self.can_afford(HATCHERY) and not self.already_pending(HATCHERY) and self.townhalls.amount < 2:
-            await self.expand_now()
-        elif self.supply_workers >= 25 and not self.already_pending(HATCHERY) and self.townhalls.amount < 3 and self.can_afford(HATCHERY):
-            await self.expand_now()
-        elif (self.supply_workers >= 37 and self.townhalls.amount < 4 and not self.already_pending(HATCHERY) and self.can_afford(HATCHERY)):
-            await self.expand_now()
-        elif self.supply_workers >= 55 and self.townhalls.amount < (self.time / 60) / 2 and self.can_afford(HATCHERY):
-            await self.expand_now()
+        try:
+            if self.supply_used >= 17 and self.can_afford(HATCHERY) and not self.already_pending(HATCHERY) and self.townhalls.amount < 2:
+                await self.expand_now()
+            elif self.supply_workers >= 25 and not self.already_pending(HATCHERY) and self.townhalls.amount < 3 and self.can_afford(HATCHERY):
+                await self.expand_now()
+            elif (self.supply_workers >= 37 and self.townhalls.amount < 4 and not self.already_pending(HATCHERY) and self.can_afford(HATCHERY)):
+                await self.expand_now()
+            elif self.supply_workers >= 55 and self.townhalls.amount < (self.time / 60) / 2 and self.can_afford(HATCHERY):
+                await self.expand_now()
+        except Exception as e:
+            print(str(e))
 
     async def build_extractors(self):
-        if (self.townhalls.amount >= 2 and not self.already_pending(EXTRACTOR) and self.gas_buildings.amount < 1) or (self.time > 270 and self.currentDroneCountIncludingPending > 35 and self.structures(EXTRACTOR).amount < self.townhalls.amount * 1.5):
+        if (self.townhalls.amount >= 2 and not self.already_pending(EXTRACTOR) and self.gas_buildings.amount < 1 and self.structures(SPAWNINGPOOL).exists) or (self.time > 270 and self.currentDroneCountIncludingPending > 35 and self.structures(EXTRACTOR).amount < self.townhalls.amount * 1.5):
             worker = self.select_build_worker(self.townhalls.first)
             if self.can_afford(EXTRACTOR):
                 worker.build_gas(
@@ -156,7 +157,7 @@ class DeetssBot(sc2.BotAI):
         if self.currentDroneCountIncludingPending >= 17 and not self.structures(SPAWNINGPOOL).exists and self.already_pending(SPAWNINGPOOL) < 1 and self.townhalls.amount >= 2:
             if self.can_afford(SPAWNINGPOOL):
                 #pos = await self.find_placement(SPAWNINGPOOL, townhallLocationFurthestFromOpponent, min_distance=6)
-                pos = await self.find_placement(SPAWNINGPOOL, self.townhalls.ready.random.position.to2)
+                pos = await self.find_placement(SPAWNINGPOOL, self.townhalls.ready.random.position)
                 if pos is not None:
                     drone = self.workers.closest_to(pos)
                     if self.can_afford(SPAWNINGPOOL):
@@ -164,8 +165,8 @@ class DeetssBot(sc2.BotAI):
                         drone.build(SPAWNINGPOOL, pos)
 
         # warren if spawing pool
-        if self.structures(SPAWNINGPOOL).ready and self.can_afford(ROACHWARREN) and not self.structures(ROACHWARREN).exists and self.already_pending(ROACHWARREN) < 1:
-            pos = await self.find_placement(ROACHWARREN, self.townhalls.ready.random.position.to2)
+        if self.structures(SPAWNINGPOOL).ready and self.can_afford(ROACHWARREN) and not self.structures(ROACHWARREN).exists and not self.already_pending(ROACHWARREN):
+            pos = await self.find_placement(ROACHWARREN, self.townhalls.ready.random.position)
             if pos is not None:
                 print("Incoming Roach Warren! @ " + self.time_formatted)
                 drone = self.workers.closest_to(pos)
@@ -175,7 +176,7 @@ class DeetssBot(sc2.BotAI):
         if self.supply_workers > 20 and self.can_afford(EVOLUTIONCHAMBER) and not self.already_pending(EVOLUTIONCHAMBER) + self.structures(EVOLUTIONCHAMBER).amount >= 2:
             if self.can_afford(EVOLUTIONCHAMBER):
                 #pos = await self.find_placement(SPAWNINGPOOL, townhallLocationFurthestFromOpponent, min_distance=6)
-                pos = await self.find_placement(EVOLUTIONCHAMBER, self.townhalls.ready.random.position.to2)
+                pos = await self.find_placement(EVOLUTIONCHAMBER, self.townhalls.ready.random.position)
                 if pos is not None:
                     drone = self.workers.closest_to(pos)
                     if self.can_afford(EVOLUTIONCHAMBER):
@@ -250,8 +251,6 @@ class DeetssBot(sc2.BotAI):
                 elif self.units(ZERGLING).amount < self.units(ROACH).amount / 2:
                     self.larva.random.train(ZERGLING)
 
-                
-            
         # queens @ pool
         if self.structures(SPAWNINGPOOL).ready and (self.units(QUEEN).amount + self.already_pending(QUEEN) < self.townhalls.ready.idle.amount * self.time / 90) and not self.units(QUEEN).amount >= self.townhalls.ready.idle.amount * 5 and self.can_afford(QUEEN):
             hatcheries = self.townhalls.ready.idle
@@ -371,7 +370,7 @@ class DeetssBot(sc2.BotAI):
         for UNIT in aggressive_units:
             if len(self.units(UNIT).idle) > 0:
                 target = False
-                if self.iteration > self.do_something_after:
+                if self.time > self.do_something_after:
                     if self.use_model:
                         prediction = self.model.predict([self.flipped.reshape(-1,176,200,3)])
                         choice = np.argmax(prediction[0])
@@ -389,7 +388,7 @@ class DeetssBot(sc2.BotAI):
                     if choice == 0:
                         # no attack
                         wait = random.randrange(20, 165)
-                        self.do_something_after = self.iteration + wait
+                        self.do_something_after = self.time + wait
 
                     elif choice == 1:
                         #attack_unit_closest_nexus
