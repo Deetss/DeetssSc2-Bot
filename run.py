@@ -4,8 +4,6 @@ import numpy as np
 import time
 from collections import OrderedDict
 
-import keras
-
 import sc2
 from sc2 import run_game, maps, Race, Difficulty, Result, position
 from sc2.player import Bot, Computer
@@ -17,8 +15,13 @@ from sc2.data import race_gas, race_worker, race_townhalls, ActionResult, Attrib
 
 HEADLESS = True
 
+USE_MODEL = False
+
+if USE_MODEL:
+    import keras
+
 class DeetssBot(sc2.BotAI):
-    def __init__(self, use_model=False):
+    def __init__(self):
         self.buildStuffInverval = 2
         self.ITERATIONS_PER_MINUTE = 165
         self.MAX_WORKERS = 55
@@ -26,12 +29,16 @@ class DeetssBot(sc2.BotAI):
         self.exactExpansionLocations = []
         
         self.train_data = []
-        self.use_model = use_model
+        self.use_model = USE_MODEL
+        try:
+            if self.use_model:            
+                print("USING MODEL!!")
+                self.model = keras.models.load_model(
+                    "BasicCNN-10-epochs-0.0001-LR-STAGE1")
+        except OSError:
+            print(OSError)
+            print("\nMaybe you need to train a model first")
 
-        if self.use_model:
-            print("USING MODEL!!")
-            self.model = keras.models.load_model(
-                "BasicCNN-10-epochs-0.0001-LR-STAGE1")
     async def on_step(self, iteration):
         # do this every step
         self.iteration = iteration
@@ -39,7 +46,7 @@ class DeetssBot(sc2.BotAI):
             DRONE) + self.units(EXTRACTOR).ready.filter(lambda x: x.vespene_contents > 0).amount
 
         if iteration == 0:
-            print(self._game_info.map_ramps)
+            #print(self._game_info.map_ramps)
             self.units(OVERLORD).random.move(self.enemy_start_locations[0]) # send out first ovey
             await self.chat_send("(glhf)")
             await self.findExactExpansionLocations()
@@ -176,20 +183,20 @@ class DeetssBot(sc2.BotAI):
                         drone.build(EVOLUTIONCHAMBER, pos)
         
         # start hydra den if lair
-        if self.structures(LAIR).ready.amount > 0 and not self.structures(HYDRALISKDEN).exists:
+        if self.structures(LAIR).ready.amount > 0 and not self.structures(HYDRALISKDEN).exists and not self.already_pending(HYDRALISKDEN):
             if self.can_afford(HYDRALISKDEN):
                 #pos = await self.find_placement(SPAWNINGPOOL, townhallLocationFurthestFromOpponent, min_distance=6)
                 pos = await self.find_placement(HYDRALISKDEN, self.townhalls.ready.random.position.to2)
                 if pos is not None:
                     drone = self.workers.closest_to(pos)
-                    if self.can_afford(HYDRALISKDEN):
+                    if self.can_afford(HYDRALISKDEN) and drone:
                         print("Building hydra den now! @ " +
                               self.time_formatted)
                         drone.build(HYDRALISKDEN, pos)
 
 
     async def research_upgrades(self):
-        # speedlings at 100 gas
+        # speedlings at 100 gas TODO: speed this waaaaaaaaaay up. i think it may be the way workers are spread early
         if self.structures(SPAWNINGPOOL).ready and self.vespene >= 100:
             self.structures(SPAWNINGPOOL).first.research(
                 UpgradeId.ZERGLINGMOVEMENTSPEED)
@@ -401,14 +408,14 @@ class DeetssBot(sc2.BotAI):
                     if target:
                         for unit in self.units(UNIT).idle:
                             unit.attack(target)
-                # if self.units(UNIT).ready.amount > aggressive_units[UNIT][0] and self.units(UNIT).amount > aggressive_units[UNIT][1]:
-                #     for s in self.units(UNIT).idle:
-                #         s.attack(await self.find_target(self.state))
+                        # if self.units(UNIT).ready.amount > aggressive_units[UNIT][0] and self.units(UNIT).amount > aggressive_units[UNIT][1]:
+                        #     for s in self.units(UNIT).idle:
+                        #         s.attack(await self.find_target(self.state))
 
-                # elif self.units(UNIT).ready.amount > aggressive_units[UNIT][1]:
-                #     if len(self.enemy_units) > 0:
-                #         for s in self.units(UNIT).idle:
-                #             s.attack(random.choice(self.enemy_units))
+                        # elif self.units(UNIT).ready.amount > aggressive_units[UNIT][1]:
+                        #     if len(self.enemy_units) > 0:
+                        #         for s in self.units(UNIT).idle:
+                        #             s.attack(random.choice(self.enemy_units))
                     y = np.zeros(4)
                     y[choice] = 1
                     print(choice)
@@ -434,13 +441,13 @@ class DeetssBot(sc2.BotAI):
             if self.use_model:
                 f.write("Model {}\n".format(game_result))
             else:
-                f.write("Random {}\m".format(game_result))
+                f.write("Random {}\n".format(game_result))
 
         if game_result == Result.Victory:
             np.save("train_data/{}.npy".format(str(int(time.time()))), np.array(self.train_data))
 
 while True:
     run_game(maps.get("Abyssal Reef LE"), [
-        Bot(Race.Zerg, DeetssBot(use_model=True)),
+        Bot(Race.Zerg, DeetssBot()),
         Computer(Race.Random, Difficulty.Hard)
     ], realtime=False)

@@ -3,3 +3,6 @@ train_data/*
 logs/*
 
 BasicCNN*
+
+getTrainData.py
+log.txt

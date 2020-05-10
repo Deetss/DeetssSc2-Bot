@@ -64,11 +64,11 @@ def check_data():
     lengths = []
 
     for choice in choices:
-        print("Length of {} is: {}".format(choice, len(choices[choice])))
+        print("Length of {} is: {}\n".format(choice, len(choices[choice])))
         total_data += len(choices[choice])
         lengths.append(len(choices[choice]))
 
-        print("Total data length now is:", total_data)
+        print("Total data length now is:\n", total_data)
         return lengths
 
 # if you want to load in a previously trained model
@@ -126,7 +126,7 @@ for i in range(hm_epochs):
 
         train_data = no_attacks + attack_closest_to_hatch + attack_enemy_structures + attack_enemy_start
         random.shuffle(train_data)
-        print(len(train_data))
+        print("Total Training Data: {}".format(len(train_data))
 
         test_size = 100
         batch_size = 128
