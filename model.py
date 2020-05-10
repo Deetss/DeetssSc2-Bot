@@ -46,10 +46,11 @@ model.compile(loss='categorical_crossentropy',
             optimizer=opt,
             metrics=['accuracy'])
 
-tensorboard = TensorBoard(log_dir="logs/stage1")
+tensorboard = TensorBoard(log_dir="./logs/stage1")
 
 train_data_dir = ".\\train_data"
 
+all_files = os.listdir(train_data_dir)
 
 def check_data():
     choices = {"no_attacks": no_attacks,
@@ -61,6 +62,7 @@ def check_data():
     total_data = 0
 
     lengths = []
+
     for choice in choices:
         print("Length of {} is: {}".format(choice, len(choices[choice])))
         total_data += len(choices[choice])
@@ -72,14 +74,14 @@ def check_data():
 # if you want to load in a previously trained model
 # that you want to further train:
 # keras.models.load_model(filepath)
-hm_epochs = 2
+hm_epochs = 10
 
 for i in range(hm_epochs):
     current = 0
-    increment = 200
+    increment = 70
     not_maximum = True
 
-    all_files = os.listdir(train_data_dir)
+    
     maximum = len(all_files)
     random.shuffle(all_files)
 
@@ -93,20 +95,18 @@ for i in range(hm_epochs):
         for file in all_files[current:current+increment]:
             full_path = os.path.join(train_data_dir, file)
             data = np.load(full_path)
-            print(full_path)
 
             data = list(data)
             for d in data:
-                
                 choice = np.argmax(d[0])
                 if choice == 0:
-                    no_attacks.append(d[0], d[1])
+                    no_attacks.append([d[0], d[1]])
                 elif choice == 1:
-                    attack_closest_to_hatch.append(d[0], d[1])
+                    attack_closest_to_hatch.append([d[0], d[1]])
                 elif choice == 2:
-                    attack_enemy_structures.append(d[0], d[1])
+                    attack_enemy_structures.append([d[0], d[1]])
                 elif choice == 3:
-                    attack_enemy_start.append(d[0], d[1])
+                    attack_enemy_start.append([d[0], d[1]])
 
         lengths = check_data()
 
@@ -125,7 +125,6 @@ for i in range(hm_epochs):
         check_data()
 
         train_data = no_attacks + attack_closest_to_hatch + attack_enemy_structures + attack_enemy_start
-
         random.shuffle(train_data)
         print(len(train_data))
 

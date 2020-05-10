@@ -4,6 +4,8 @@ import numpy as np
 import time
 from collections import OrderedDict
 
+import keras
+
 import sc2
 from sc2 import run_game, maps, Race, Difficulty, Result, position
 from sc2.player import Bot, Computer
@@ -16,15 +18,20 @@ from sc2.data import race_gas, race_worker, race_townhalls, ActionResult, Attrib
 HEADLESS = True
 
 class DeetssBot(sc2.BotAI):
-    def __init__(self):
+    def __init__(self, use_model=False):
         self.buildStuffInverval = 2
         self.ITERATIONS_PER_MINUTE = 165
         self.MAX_WORKERS = 55
-        self.last_known_enemy_count = 0
-        self.train_data = []
         self.do_something_after = 0
         self.exactExpansionLocations = []
+        
+        self.train_data = []
+        self.use_model = use_model
 
+        if self.use_model:
+            print("USING MODEL!!")
+            self.model = keras.models.load_model(
+                "BasicCNN-10-epochs-0.0001-LR-STAGE1")
     async def on_step(self, iteration):
         # do this every step
         self.iteration = iteration
@@ -355,9 +362,22 @@ class DeetssBot(sc2.BotAI):
         
         for UNIT in aggressive_units:
             if len(self.units(UNIT).idle) > 0:
-                choice = random.randrange(0, 4)
                 target = False
                 if self.iteration > self.do_something_after:
+                    if self.use_model:
+                        prediction = self.model.predict([self.flipped.reshape(-1,176,200,3)])
+                        choice = np.argmax(prediction[0])
+
+                        choice_dict = {0: "No Attack!",
+                                    1: "Attack close to our Hatch!",
+                                    2: "Attack Enemy Struture!",
+                                    3: "Attack Enemy Start!"}
+                        
+                        print("Choice #{}:{}".format(choice, choice_dict[choice]))
+                    else:
+                        choice = random.randrange(0, 4)
+
+                    
                     if choice == 0:
                         # no attack
                         wait = random.randrange(20, 165)
@@ -378,21 +398,21 @@ class DeetssBot(sc2.BotAI):
                         #attack_enemy_start
                         target = self.enemy_start_locations[0]
             
-                if target:
-                    for unit in self.units(UNIT).idle:
-                        unit.attack(target)
-            # if self.units(UNIT).ready.amount > aggressive_units[UNIT][0] and self.units(UNIT).amount > aggressive_units[UNIT][1]:
-            #     for s in self.units(UNIT).idle:
-            #         s.attack(await self.find_target(self.state))
+                    if target:
+                        for unit in self.units(UNIT).idle:
+                            unit.attack(target)
+                # if self.units(UNIT).ready.amount > aggressive_units[UNIT][0] and self.units(UNIT).amount > aggressive_units[UNIT][1]:
+                #     for s in self.units(UNIT).idle:
+                #         s.attack(await self.find_target(self.state))
 
-            # elif self.units(UNIT).ready.amount > aggressive_units[UNIT][1]:
-            #     if len(self.enemy_units) > 0:
-            #         for s in self.units(UNIT).idle:
-            #             s.attack(random.choice(self.enemy_units))
-                y = np.zeros(4)
-                y[choice] = 1
-                print(y)
-                self.train_data.append([y, self.flipped])
+                # elif self.units(UNIT).ready.amount > aggressive_units[UNIT][1]:
+                #     if len(self.enemy_units) > 0:
+                #         for s in self.units(UNIT).idle:
+                #             s.attack(random.choice(self.enemy_units))
+                    y = np.zeros(4)
+                    y[choice] = 1
+                    print(choice)
+                    self.train_data.append([y, self.flipped])
         
 
     async def queen_micro(self):
@@ -410,11 +430,17 @@ class DeetssBot(sc2.BotAI):
         print("Game and ended")
         print(game_result)
 
+        with open("log.txt", "a") as f:
+            if self.use_model:
+                f.write("Model {}\n".format(game_result))
+            else:
+                f.write("Random {}\m".format(game_result))
+
         if game_result == Result.Victory:
             np.save("train_data/{}.npy".format(str(int(time.time()))), np.array(self.train_data))
 
 while True:
     run_game(maps.get("Abyssal Reef LE"), [
-        Bot(Race.Zerg, DeetssBot()),
+        Bot(Race.Zerg, DeetssBot(use_model=True)),
         Computer(Race.Random, Difficulty.Hard)
     ], realtime=False)
