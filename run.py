@@ -203,29 +203,30 @@ class DeetssBot(sc2.BotAI):
 
         # start upgrades if evos are done
         if self.structures(EVOLUTIONCHAMBER).ready.idle.exists:
-            for evo in self.structures(EVOLUTIONCHAMBER).ready.idle:
+            if self.structures(EVOLUTIONCHAMBER).ready.idle:
+                evo = self.structures(EVOLUTIONCHAMBER).ready.idle.random
                 abilities = await self.get_available_abilities(evo)
                 targetAbilities = [AbilityId.RESEARCH_ZERGMISSILEWEAPONSLEVEL1, AbilityId.RESEARCH_ZERGMISSILEWEAPONSLEVEL2, AbilityId.RESEARCH_ZERGMISSILEWEAPONSLEVEL3,
                                     AbilityId.RESEARCH_ZERGGROUNDARMORLEVEL1, AbilityId.RESEARCH_ZERGGROUNDARMORLEVEL2, AbilityId.RESEARCH_ZERGGROUNDARMORLEVEL3]
                 for ability in targetAbilities:
-                    if ability in abilities:
-                        if self.can_afford(ability):
+                    if self.can_afford(ability) and ability in abilities:
                             print("Researching " + ability.name)
                             evo(ability)
 
         # lair @ 35 workers
-        if self.currentDroneCountIncludingPending > 20 and self.structures(LAIR).amount <= 1 and self.can_afford(LAIR) and self.townhalls.ready.idle.amount > 0:
+        if self.currentDroneCountIncludingPending > 20 and self.structures(LAIR).amount <= 1 and self.can_afford(LAIR) and self.townhalls.ready.idle.amount > 0 and not self.already_pending(LAIR):
             print("Upgrading to Lair @ " + self.time_formatted)
             self.townhalls.first(UPGRADETOLAIR_LAIR)
 
         # start upgrades if den are done
         if self.structures(HYDRALISKDEN).ready.idle.exists:
-            for den in self.structures(HYDRALISKDEN).ready.idle:
+            if self.structures(HYDRALISKDEN).ready.idle:
+                den = self.structures(HYDRALISKDEN).ready.idle.random
                 abilities = await self.get_available_abilities(den)
                 targetAbilities = [AbilityId.RESEARCH_GROOVEDSPINES, AbilityId.RESEARCH_MUSCULARAUGMENTS]
                 for ability in targetAbilities:
                     if ability in abilities:
-                        if self.can_afford(ability):
+                        if self.can_afford(ability) and ability in abilities:
                             print("Researching " + ability.name)
                             den(ability)
 
@@ -418,7 +419,7 @@ class DeetssBot(sc2.BotAI):
                         #             s.attack(random.choice(self.enemy_units))
                     y = np.zeros(4)
                     y[choice] = 1
-                    print(choice)
+                    #print(choice)
                     self.train_data.append([y, self.flipped])
         
 
