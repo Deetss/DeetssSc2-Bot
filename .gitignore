@@ -8,4 +8,5 @@ logs/*
 BasicCNN*
 
 # Winrate logs dont go to github
-log.txt
+*.txt
+*.model

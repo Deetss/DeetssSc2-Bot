@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import time
 from collections import OrderedDict
+import multiprocessing
 
 import sc2
 from sc2 import run_game, maps, Race, Difficulty, Result, position
@@ -13,12 +14,9 @@ from sc2.units import Units
 from sc2.position import Point2, Point3
 from sc2.data import race_gas, race_worker, race_townhalls, ActionResult, Attribute, Race
 
-HEADLESS = True
+HEADLESS = False
 
-USE_MODEL = False
-
-if USE_MODEL:
-    import keras
+USE_MODEL = True
 
 class DeetssBot(sc2.BotAI):
     def __init__(self):
@@ -29,11 +27,15 @@ class DeetssBot(sc2.BotAI):
         
         self.train_data = []
         self.use_model = USE_MODEL
+
+        if self.use_model:
+            import tensorflow as tf
+
         try:
-            if self.use_model:            
-                print("USING MODEL!!")
-                self.model = keras.models.load_model(
-                    "BasicCNN-30-epochs-0.0001-LR-STAGE1")
+            if self.use_model:       
+                print("\n\n\nUSING MODEL!!\n\n\n")
+                self.model = tf.keras.models.load_model(
+                    "1x512-CNN.model")
         except OSError:
             print(OSError)
             print("\nMaybe you need to train a model first")
@@ -128,7 +130,7 @@ class DeetssBot(sc2.BotAI):
                 self.larva.random.train(DRONE)
 
     async def build_overseers(self):
-        if self.supply_left <= 2 and self.larva and self.can_afford(OVERLORD) and not self.already_pending(OVERLORD):
+        if self.supply_left <= 2 and self.larva and self.can_afford(OVERLORD) and not self.supply_cap == 200 and self.already_pending(OVERLORD) < 2:
             self.larva.random.train(OVERLORD)
 
     async def expand(self):
@@ -172,8 +174,8 @@ class DeetssBot(sc2.BotAI):
                 drone = self.workers.closest_to(pos)
                 drone.build(ROACHWARREN, pos)
 
-        # start some evo chambers if pool is done
-        if self.supply_workers > 20 and self.can_afford(EVOLUTIONCHAMBER) and not self.already_pending(EVOLUTIONCHAMBER) + self.structures(EVOLUTIONCHAMBER).amount >= 2:
+        # start some evo chambers if pool is done and warren started
+        if self.supply_workers > 20 and self.can_afford(EVOLUTIONCHAMBER) and not self.already_pending(EVOLUTIONCHAMBER) + self.structures(EVOLUTIONCHAMBER).amount >= 2 and self.structures(ROACHWARREN).amount == 1:
             if self.can_afford(EVOLUTIONCHAMBER):
                 #pos = await self.find_placement(SPAWNINGPOOL, townhallLocationFurthestFromOpponent, min_distance=6)
                 pos = await self.find_placement(EVOLUTIONCHAMBER, self.townhalls.ready.random.position)
@@ -252,7 +254,7 @@ class DeetssBot(sc2.BotAI):
                     self.larva.random.train(ZERGLING)
 
         # queens @ pool
-        if self.structures(SPAWNINGPOOL).ready and (self.units(QUEEN).amount + self.already_pending(QUEEN) < self.townhalls.ready.idle.amount * self.time / 90) and not self.units(QUEEN).amount >= self.townhalls.ready.idle.amount * 5 and self.can_afford(QUEEN):
+        if self.structures(SPAWNINGPOOL).ready and (self.units(QUEEN).amount + self.already_pending(QUEEN) < self.townhalls.ready.idle.amount * self.time / 90) and not self.units(QUEEN).amount >= 15 and self.can_afford(QUEEN):
             hatcheries = self.townhalls.ready.idle
             for hatch in hatcheries:
                 hatch.train(QUEEN)
@@ -262,6 +264,8 @@ class DeetssBot(sc2.BotAI):
     async def intel(self):
         struct_dict = {
             HATCHERY: [4, (0, 255, 0)],
+            LAIR: [4, (0, 255, 0)],
+            HIVE: [4, (0, 255, 0)],
             EXTRACTOR: [2, (55, 200, 0)],
             SPAWNINGPOOL: [2, (200, 100, 0)],
             EVOLUTIONCHAMBER: [2, (150, 150, 0)],
@@ -295,7 +299,7 @@ class DeetssBot(sc2.BotAI):
                 cv2.circle(game_data, (int(pos[0]), int(
                     pos[1])), struct_dict[struct_type][0], struct_dict[struct_type][1], -1)  # BGR
 
-        main_base_names = ["nexus", "commandcenter", "hatchery"]
+        main_base_names = ["nexus", "commandcenter", "hatchery", "lair", "hive"]
         for enemy_building in self.enemy_structures:
             pos = enemy_building.position
             if enemy_building.name.lower() not in main_base_names:
@@ -335,8 +339,11 @@ class DeetssBot(sc2.BotAI):
 
         plausible_supply = self.supply_cap / 200.0
 
-        military_weight = len(self.units({HYDRALISK, ROACH, ZERGLING})) / \
-            (self.supply_cap-self.supply_left)
+        if not self.supply_cap-self.supply_left == 0:
+            military_weight = len(self.units({HYDRALISK, ROACH, ZERGLING})) / (self.supply_cap-self.supply_left)
+        else:
+            military_weight = 0
+
         if military_weight > 1.0:
             military_weight = 1.0
 
@@ -388,7 +395,7 @@ class DeetssBot(sc2.BotAI):
                     if choice == 0:
                         # no attack
                         wait = random.randrange(20, 165)
-                        self.do_something_after = self.time + wait
+                        self.do_something_after = self.time  + wait
 
                     elif choice == 1:
                         #attack_unit_closest_nexus
@@ -403,6 +410,7 @@ class DeetssBot(sc2.BotAI):
 
                     elif choice == 3:
                         #attack_enemy_start
+                        
                         target = self.enemy_start_locations[0]
             
                     if target:
@@ -446,8 +454,15 @@ class DeetssBot(sc2.BotAI):
         if game_result == Result.Victory:
             np.save("train_data/{}.npy".format(str(int(time.time()))), np.array(self.train_data))
 
-while True:
-    run_game(maps.get("Abyssal Reef LE"), [
-        Bot(Race.Zerg, DeetssBot()),
-        Computer(Race.Random, Difficulty.Hard)
-    ], realtime=False)
+
+def start_bot():
+        run_game(maps.get("Abyssal Reef LE"), [
+            Bot(Race.Zerg, DeetssBot()),
+            Computer(Race.Random, Difficulty.Hard)
+        ], realtime=False)
+
+if __name__ == '__main__':
+    while True:
+        p = multiprocessing.Process(target=start_bot)
+        p.start()
+        p.join()
