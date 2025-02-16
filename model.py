@@ -6,11 +6,20 @@ from datetime import datetime
 import gc
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-# os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
 import tensorflow as tf
-from tensorflow.keras import Model, Input
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, BatchNormalization
+from tf.keras import Model, Input
+from tf.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, BatchNormalization
+
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    print("GPUs found:", gpus)
+    # Optionally, enable memory growth for each GPU.
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+else:
+    print("No GPU found!")
 
 # Define missing constants and variables
 BATCH_SIZE = 32

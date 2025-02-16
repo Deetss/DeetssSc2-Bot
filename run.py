@@ -379,7 +379,7 @@ class DeetssBot(BotAI):
             await self.expand_now()
 
 while True:
-    run_game(maps.get("Abyssal Reef LE"), [
-        Bot(Race.Zerg, DeetssBot(use_model=False)),
+    run_game(maps.get("AbyssalReefLE"), [
+        Bot(Race.Zerg, DeetssBot(use_model=True)),
         Computer(Race.Protoss, Difficulty.Hard)
     ], realtime=False)
