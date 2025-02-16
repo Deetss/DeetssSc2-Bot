@@ -1,5 +1,5 @@
-opencv-python
-burnysc2
+numpy>=1.26.0
+opencv-python>=4.8.0
+tensorflow>=2.15.0
 python-dotenv
-keras
-tensorflow
+git+https://github.com/SoupCatcher/python-sc2@fix-observer-ai

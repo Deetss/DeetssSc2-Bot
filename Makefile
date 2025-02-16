@@ -1,11 +1,11 @@
 run:
-	python3 run.py
+	python run.py
 
 model:
-	CUDA_VISIBLE_DEVICES="" python3 model.py
+	python model.py
 
 observe:
-	python3 observer.py
+	python observer.py
 
 test:
 	pytest

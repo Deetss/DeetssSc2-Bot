@@ -225,22 +225,24 @@ class DeetssBot(BotAI):
             cv2.waitKey(1)
 
     def log_state(self, iteration):
-      debug_dir = "bot_vision/debug"
-      filename = f"{debug_dir}/debug_state_{iteration}.png"
-      cv2.imwrite(filename, self.flipped)
+        debug_dir = "bot_vision/debug"
+        if not os.path.exists(debug_dir):
+            os.makedirs(debug_dir)
+        filename = f"{debug_dir}/debug_state_{iteration}.png"
+        cv2.imwrite(filename, self.flipped)
 
-      # List debug images and remove older ones if there are more than 50
-      files = [f for f in os.listdir(debug_dir) if f.startswith("debug_state_") and f.endswith(".png")]
-      if len(files) > 50:
-          def extract_iter(f):
-              try:
-                  return int(f.replace("debug_state_", "").replace(".png", ""))
-              except ValueError:
-                  return 0
-          files.sort(key=extract_iter)
-          files_to_remove = files[:-50]  # keep only last 50
-          for old_file in files_to_remove:
-              os.remove(os.path.join(debug_dir, old_file))
+        # List debug images and remove older ones if there are more than 50
+        files = [f for f in os.listdir(debug_dir) if f.startswith("debug_state_") and f.endswith(".png")]
+        if len(files) > 50:
+            def extract_iter(f):
+                try:
+                    return int(f.replace("debug_state_", "").replace(".png", ""))
+                except ValueError:
+                    return 0
+            files.sort(key=extract_iter)
+            files_to_remove = files[:-50]  # keep only last 50
+            for old_file in files_to_remove:
+                os.remove(os.path.join(debug_dir, old_file))
 
     def get_state_representation(self):
         """
@@ -377,7 +379,7 @@ class DeetssBot(BotAI):
             await self.expand_now()
 
 while True:
-    run_game(maps.get("AbyssalReefAIE"), [
+    run_game(maps.get("Abyssal Reef LE"), [
         Bot(Race.Zerg, DeetssBot(use_model=False)),
         Computer(Race.Protoss, Difficulty.Hard)
     ], realtime=False)

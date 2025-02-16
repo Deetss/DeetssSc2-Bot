@@ -6,7 +6,7 @@ from datetime import datetime
 import gc
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+# os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
 import tensorflow as tf
 from tensorflow.keras import Model, Input
@@ -83,12 +83,20 @@ def process_batch(files, start, end):
     print(f"Processing files {start} to {end}")
     for file in files[start:end]:
         try:
-            data = np.load(os.path.join(train_data_dir, file), allow_pickle=True)
-            for d in data:
-                if d[1].shape == (176, 200, 3):
-                    sample = (d[0], d[1].astype(np.float32) / 255.0)
+            data = np.load(os.path.join(train_data_dir, file))
+
+            # Get labels and frames from the dictionary
+            labels = data['labels']
+            frames = data['frames']
+
+            # Process each frame and label pair
+            for label, frame in zip(labels, frames):
+                if frame.shape == (176, 200, 3):
+                    # Frame is already normalized in observer.py
+                    sample = (label, frame)
                     batch_data.append(sample)
                     total_samples += 1
+                    
                 if total_samples >= BATCH_SIZE:
                     x = np.array([i[1] for i in batch_data])
                     y = np.array([i[0] for i in batch_data])
