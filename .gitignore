@@ -1,3 +1,6 @@
 train_data/*
-
+.env
 logs/*
+bot_vision/debug/*
+model_checkpoints/*
+*.keras

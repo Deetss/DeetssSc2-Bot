@@ -1,150 +1,174 @@
-import keras  # Keras 2.1.2 and TF-GPU 1.8.0
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, Flatten
-from keras.layers import Conv2D, MaxPooling2D
-from keras.callbacks import TensorBoard
-import numpy as np
 import os
 import random
+import numpy as np
+import psutil
+from datetime import datetime
+import gc
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
-model = Sequential()
-model.add(Conv2D(32, (3,3), padding='same',
-                            input_shape=(176,200,3),
-                            activation='relu'))
-model.add(Conv2D(32, (3, 3), padding='same',
-                 activation='relu'))
-model.add(MaxPooling2D(pool_size=(2,2)))
-model.add(Dropout(0.2))
+import tensorflow as tf
+from tensorflow.keras import Model, Input
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, BatchNormalization
 
-model.add(Conv2D(64, (3, 3), padding='same',
-                 input_shape=(176, 200, 3),
-                 activation='relu'))
-model.add(Conv2D(64, (3, 3), padding='same',
-                 activation='relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-model.add(Dropout(0.2))
+# Define missing constants and variables
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+EPOCHS = 10
 
+# Directory containing training files (adjust this path as needed)
+train_data_dir = "./train_data/"
 
-model.add(Conv2D(128, (3, 3), padding='same',
-                 activation='relu'))
-model.add(Conv2D(128, (3, 3), activation='relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-model.add(Dropout(0.2))
+# Get list of all files and split into training and validation lists (90/10 split)
+all_files = os.listdir(train_data_dir)
+random.shuffle(all_files)
+split_idx = int(0.9 * len(all_files))
+train_files = all_files[:split_idx]
+val_files = all_files[split_idx:]
 
-model.add(Flatten())
-model.add(Dense(512, activation='relu'))
-model.add(Dropout(0.5))
+def print_memory_usage():
+    """Monitor memory usage"""
+    process = psutil.Process(os.getpid())
+    print(f"Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
+def create_model():
+    """Create model using Functional API with proper input layer"""
+    inputs = Input(shape=(176, 200, 3))
+    
+    # First conv block
+    x = Conv2D(32, (3,3), padding='same', activation='relu')(inputs)
+    x = BatchNormalization()(x)
+    x = MaxPooling2D(pool_size=(2,2))(x)
+    x = Dropout(0.2)(x)
+    
+    # Second conv block
+    x = Conv2D(64, (3,3), padding='same', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling2D(pool_size=(2,2))(x)
+    x = Dropout(0.2)(x)
+    
+    # Third conv block
+    x = Conv2D(64, (3,3), activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling2D(pool_size=(2,2))(x)
+    x = Dropout(0.2)(x)
+    
+    # Dense layers
+    x = Flatten()(x)
+    x = Dense(256, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.5)(x)
+    outputs = Dense(4, activation='softmax')(x)
+    
+    return Model(inputs=inputs, outputs=outputs)
 
-model.add(Dense(4, activation='softmax'))
+def data_generator(files, batch_size=32):
+    """Generator for memory-efficient data loading"""
+    while True:
+        random.shuffle(files)
+        for i in range(0, len(files), batch_size):
+            batch_files = files[i:i + batch_size]
+            batch_data = list(process_batch(batch_files, 0, len(batch_files)))
+            if batch_data:
+                x = np.concatenate([x for x, _ in batch_data], axis=0)
+                y = np.concatenate([y for _, y in batch_data], axis=0)
+                yield x, y
 
-learning_rate = 0.0001
-opt = keras.optimizers.adam(lr=learning_rate, decay=1e-6)
-
-model.compile(loss='categorical_crossentropy',
-            optimizer=opt,
-            metrics=['accuracy'])
-
-tensorboard = TensorBoard(log_dir="logs/stage1")
-
-train_data_dir = ".\\train_data"
-
-
-def check_data():
-    choices = {"no_attacks": no_attacks,
-               "attack_closest_to_hatch": attack_closest_to_hatch,
-               "attack_enemy_structures": attack_enemy_structures,
-               "attack_enemy_start": attack_enemy_start
-               }
-
-    total_data = 0
-
-    lengths = []
-    for choice in choices:
-        print("Length of {} is: {}".format(choice, len(choices[choice])))
-        total_data += len(choices[choice])
-        lengths.append(len(choices[choice]))
-
-        print("Total data length now is:", total_data)
-        return lengths
-
-# if you want to load in a previously trained model
-# that you want to further train:
-# keras.models.load_model(filepath)
-hm_epochs = 2
-
-for i in range(hm_epochs):
-    current = 0
-    increment = 200
-    not_maximum = True
-
-    all_files = os.listdir(train_data_dir)
-    maximum = len(all_files)
-    random.shuffle(all_files)
-
-    while not_maximum:
-        print("WORKING ON {}:{}".format(current, current+increment))
-        no_attacks = []
-        attack_closest_to_hatch = []
-        attack_enemy_structures = []
-        attack_enemy_start = []
-
-        for file in all_files[current:current+increment]:
-            full_path = os.path.join(train_data_dir, file)
-            data = np.load(full_path)
-            print(full_path)
-
-            data = list(data)
+def process_batch(files, start, end):
+    """Process data in smaller batches with memory tracking"""
+    batch_data = []
+    total_samples = 0
+    
+    print(f"Processing files {start} to {end}")
+    for file in files[start:end]:
+        try:
+            data = np.load(os.path.join(train_data_dir, file), allow_pickle=True)
             for d in data:
+                if d[1].shape == (176, 200, 3):
+                    sample = (d[0], d[1].astype(np.float32) / 255.0)
+                    batch_data.append(sample)
+                    total_samples += 1
+                if total_samples >= BATCH_SIZE:
+                    x = np.array([i[1] for i in batch_data])
+                    y = np.array([i[0] for i in batch_data])
+                    yield x, y
+                    batch_data = []
+                    total_samples = 0
+                    gc.collect()
+        except Exception as e:
+            print(f"Error processing {file}: {e}")
+            continue
+    
+    if batch_data:
+        x = np.array([i[1] for i in batch_data])
+        y = np.array([i[0] for i in batch_data])
+        yield x, y
+
+# Build model and compile
+model = create_model()
+optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+model.compile(optimizer=optimizer,
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+def train_model_in_batches():
+    """Train model in smaller batches"""
+    print("Starting training...")
+    
+    for epoch in range(EPOCHS):
+        print(f"\nEpoch {epoch+1}/{EPOCHS}")
+        
+        # Process training and validation data via process_batch
+        train_generator = process_batch(train_files, 0, len(train_files))
+        val_generator = process_batch(val_files, 0, len(val_files))
+        
+        train_steps = 0
+        train_loss = 0
+        train_acc = 0
+        
+        # Train on batches
+        for x_batch, y_batch in train_generator:
+            history = model.train_on_batch(x_batch, y_batch)
+            train_loss += history[0]
+            train_acc += history[1]
+            train_steps += 1
+            
+            if train_steps % 10 == 0:
+                print(f"Step {train_steps}: loss = {train_loss/train_steps:.4f}, acc = {train_acc/train_steps:.4f}")
                 
-                choice = np.argmax(d[0])
-                if choice == 0:
-                    no_attacks.append(d[0], d[1])
-                elif choice == 1:
-                    attack_closest_to_hatch.append(d[0], d[1])
-                elif choice == 2:
-                    attack_enemy_structures.append(d[0], d[1])
-                elif choice == 3:
-                    attack_enemy_start.append(d[0], d[1])
+            del x_batch, y_batch
+            gc.collect()
+            
+        # Validate
+        val_steps = 0
+        val_loss = 0
+        val_acc = 0
+        
+        for x_val, y_val in val_generator:
+            val_history = model.test_on_batch(x_val, y_val)
+            val_loss += val_history[0]
+            val_acc += val_history[1]
+            val_steps += 1
+            del x_val, y_val
+            gc.collect()
+            
+        print(f"\nEpoch {epoch+1} Results:")
+        print(f"Train Loss: {train_loss/train_steps:.4f}")
+        print(f"Train Accuracy: {train_acc/train_steps:.4f}")
+        print(f"Val Loss: {val_loss/val_steps:.4f}")
+        print(f"Val Accuracy: {val_acc/val_steps:.4f}")
+        
+        # Save checkpoint
+        model.save(f"model_checkpoints/checkpoint-epoch-{epoch+1}.keras")
 
-        lengths = check_data()
-
-        lowest_data = min(lengths)
-
-        random.shuffle(no_attacks)
-        random.shuffle(attack_enemy_structures)
-        random.shuffle(attack_enemy_start)
-        random.shuffle(attack_closest_to_hatch)
-
-        no_attacks = no_attacks[:lowest_data]
-        attack_closest_to_hatch = attack_closest_to_hatch[:lowest_data]
-        attack_enemy_structures = attack_enemy_structures[:lowest_data]
-        attack_enemy_start = attack_enemy_start[:lowest_data]
-
-        check_data()
-
-        train_data = no_attacks + attack_closest_to_hatch + attack_enemy_structures + attack_enemy_start
-
-        random.shuffle(train_data)
-        print(len(train_data))
-
-        test_size = 100
-        batch_size = 128
-
-        x_train = np.array([i[1] for i in train_data[:-test_size]]).reshape(-1,176,200,3)
-        y_train = np.array([i[0] for i in train_data[:-test_size]])
-
-        x_test = np.array([i[1] for i in train_data[-test_size:]]).reshape(-1, 176, 200, 3)
-        y_test = np.array([i[0] for i in train_data[-test_size:]])
-
-        model.fit(x_train,y_train,
-                  batch_size=batch_size,
-                  validation_data=(x_test,y_test),
-                  shuffle=True,
-                  verbose=1, callbacks=[tensorboard])
-
-        model.save("BasicCNN-{}-epochs-{}-LR-STAGE1".format(hm_epochs,learning_rate))
-        current += increment
-        if current > maximum:
-            not_maximum = False
+try:
+    train_model_in_batches()
+    model.save(f"BasicCNN-Final-{EPOCHS}-epochs-{LEARNING_RATE}-LR.keras")
+    print("Training completed successfully")
+except Exception as e:
+    print(f"Training failed: {e}")
+finally:
+    print_memory_usage()
+    gc.collect()
+    tf.keras.backend.clear_session()

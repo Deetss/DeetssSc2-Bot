@@ -1,0 +1,5 @@
+opencv-python
+burnysc2
+python-dotenv
+keras
+tensorflow
