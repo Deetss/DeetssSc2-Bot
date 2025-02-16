@@ -29,7 +29,7 @@ HEADLESS = True
 class DeetssBot(BotAI):
     def __init__(self):
         super().__init__()
-        self.model = load_model("BasicCNN-2-epochs-0.0001-LR-STAGE1.keras")
+        self.model = load_model("BasicCNN-Final-10-epochs-0.001-LR.keras")
         self.buildStuffInverval = 2
         self.ITERATIONS_PER_MINUTE = 200
         self.MAX_WORKERS = 55

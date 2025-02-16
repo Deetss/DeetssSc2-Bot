@@ -49,7 +49,7 @@ class DeetssBot(BotAI):
         reward = 0.0
         
         # Economy reward: reward collecting minerals and vespene above a baseline.
-        resource_score = (self.minerals + self.vespene) / 3000.0
+        resource_score = 1 #(self.minerals + self.vespene) / 3000.0
         reward += resource_score
 
         # Penalize being supply capped

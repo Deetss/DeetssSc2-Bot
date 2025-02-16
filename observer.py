@@ -10,6 +10,7 @@ load_dotenv()
 
 from sc2.main import run_replay
 from sc2.observer_ai import ObserverAI
+from sc2.ids.unit_typeid import UnitTypeId
 
 train_data_dir = "./train_data/"
 
@@ -25,23 +26,52 @@ class ObserverBot(ObserverAI):
         
         self.iteration = 0
 
+    def compute_reward(self):
+        reward = 0.0
+        
+        # Economy reward: reward collecting minerals and vespene above a baseline.
+        resource_score = 1 #(self.minerals + self.vespene) / 3000.0
+        reward += resource_score
+
+        # Penalize being supply capped
+        if self.supply_left <= 0:
+            reward -= 1.0
+
+        # Reward for military production and readiness: e.g., if you have more army units relative to supply, reward.
+        army_units = len(self.units({UnitTypeId.ZERGLING, UnitTypeId.ROACH, UnitTypeId.HYDRALISK}))
+        if self.supply_cap - self.supply_left > 0:
+            reward += (army_units / (self.supply_cap - self.supply_left))
+
+        # Reward for successful expansion (could be based on timing, number of townhalls, etc.)
+        if self.townhalls and self.townhalls.amount >= 2:
+            reward += 0.5
+
+        # Additional domain-specific improvements can be added here once you track outcomes of attacks etc.
+        
+        return reward
+
     async def on_step(self, iteration):
         # Capture and process frame
         frame = self.get_current_frame()
         processed_frame = cv2.resize(frame, (200, 176))
         processed_frame = processed_frame.astype(np.float32) / 255.0
-        
-        # Generate label
-        label = np.array([1, 0, 0, 0], dtype=np.float32)
-        
+
+        # Compute reward from the current game state in case you need it,
+        # but for training a classification model, you need a one-hot action label.
+        # Here we assume you have a method that decides an action (0, 1, 2, or 3)
+        # For example, you could use compute_reward to guide this decision,
+        # but here we simply call a placeholder method "determine_action"
+        action = int(np.argmax(self.label_buffer[self.buffer_position]))
+        # Create one-hot encoded label for 4 classes:
+        label = np.eye(4, dtype=np.float32)[action]
+
         # Store in buffers
         self.label_buffer[self.buffer_position] = label
         self.frame_buffer[self.buffer_position] = processed_frame
         self.buffer_position += 1
-        
+
         # Save when buffer is full
         if self.buffer_position >= self.buffer_size:
-            # Save data
             save_dict = {
                 'labels': self.label_buffer,
                 'frames': self.frame_buffer
@@ -49,8 +79,7 @@ class ObserverBot(ObserverAI):
             file_path = os.path.join(train_data_dir, f"replay_data_{iteration}.npz")
             np.savez_compressed(file_path, **save_dict)
             logger.info(f"Saved {self.buffer_size} frames to {file_path}")
-            
-            # Reset buffer position
+            # Reset the buffer position
             self.buffer_position = 0
             
     def get_current_frame(self):
