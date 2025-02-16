@@ -4,3 +4,5 @@ logs/*
 bot_vision/debug/*
 model_checkpoints/*
 *.keras
+__pycache__/reward_mixin.cpython-310.pyc
+__pycache__/reward_utils.cpython-310.pyc

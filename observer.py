@@ -12,78 +12,85 @@ from sc2.main import run_replay
 from sc2.observer_ai import ObserverAI
 from sc2.ids.unit_typeid import UnitTypeId
 
+from reward_mixin import RewardMixin
+
 train_data_dir = "./train_data/"
 
-class ObserverBot(ObserverAI):
+class ObserverBot(RewardMixin, ObserverAI):
     def __init__(self):
         super().__init__()
-        self.buffer_size = 3_000
+        self.buffer_size = 1_000
         self.buffer_position = 0
-        
-        # Pre-allocate arrays with fixed sizes
+
+        # Frame + label buffers
         self.label_buffer = np.zeros((self.buffer_size, 4), dtype=np.float32)
         self.frame_buffer = np.zeros((self.buffer_size, 176, 200, 3), dtype=np.float32)
         
-        self.iteration = 0
-
-    def compute_reward(self):
-        reward = 0.0
-        
-        # Economy reward: reward collecting minerals and vespene above a baseline.
-        resource_score = 1 #(self.minerals + self.vespene) / 3000.0
-        reward += resource_score
-
-        # Penalize being supply capped
-        if self.supply_left <= 0:
-            reward -= 1.0
-
-        # Reward for military production and readiness: e.g., if you have more army units relative to supply, reward.
-        army_units = len(self.units({UnitTypeId.ZERGLING, UnitTypeId.ROACH, UnitTypeId.HYDRALISK}))
-        if self.supply_cap - self.supply_left > 0:
-            reward += (army_units / (self.supply_cap - self.supply_left))
-
-        # Reward for successful expansion (could be based on timing, number of townhalls, etc.)
-        if self.townhalls and self.townhalls.amount >= 2:
-            reward += 0.5
-
-        # Additional domain-specific improvements can be added here once you track outcomes of attacks etc.
-        
-        return reward
+        # Event log buffer: each entry holds the events in that frame
+        self.events_buffer = [list() for _ in range(self.buffer_size)]
+        self.current_events = []
 
     async def on_step(self, iteration):
-        # Capture and process frame
+        # 1. Get the current frame
         frame = self.get_current_frame()
-        processed_frame = cv2.resize(frame, (200, 176))
-        processed_frame = processed_frame.astype(np.float32) / 255.0
+        processed_frame = cv2.resize(frame, (200, 176)).astype(np.float32) / 255.0
+        
+        # 2. Decide or retrieve an action index here
+        action_index = 3 # default to wait
+        
+        # Check for economy-related events
+        if any(event["type"] == "unit_created" and event["unit_type"] in ["DRONE", "OVERLORD"] for event in self.current_events):
+            action_index = 0  # economy
 
-        # Compute reward from the current game state in case you need it,
-        # but for training a classification model, you need a one-hot action label.
-        # Here we assume you have a method that decides an action (0, 1, 2, or 3)
-        # For example, you could use compute_reward to guide this decision,
-        # but here we simply call a placeholder method "determine_action"
-        action = int(np.argmax(self.label_buffer[self.buffer_position]))
-        # Create one-hot encoded label for 4 classes:
-        label = np.eye(4, dtype=np.float32)[action]
+        # Check for army-related events
+        elif any(event["type"] == "unit_created" and event["unit_type"] in ["ZERGLING", "ROACH", "HYDRALISK"] for event in self.current_events):
+            action_index = 1  # build army
 
-        # Store in buffers
+        # Building construction
+        elif any(event["type"] == "building_started" for event in self.current_events):
+            action_index = 0 # economy
+
+        # You'll need to expand this logic to cover all possible actions
+        label = np.eye(4, dtype=np.float32)[action_index]
+
+        # 3. Store the frame, label, and any gathered events
         self.label_buffer[self.buffer_position] = label
         self.frame_buffer[self.buffer_position] = processed_frame
-        self.buffer_position += 1
+        self.events_buffer[self.buffer_position] = self.current_events[:]
 
-        # Save when buffer is full
+        self.buffer_position += 1
+        self.current_events.clear()
+
+        # 4. Save if buffer is full
         if self.buffer_position >= self.buffer_size:
-            save_dict = {
-                'labels': self.label_buffer,
-                'frames': self.frame_buffer
-            }
-            file_path = os.path.join(train_data_dir, f"replay_data_{iteration}.npz")
-            np.savez_compressed(file_path, **save_dict)
-            logger.info(f"Saved {self.buffer_size} frames to {file_path}")
-            # Reset the buffer position
+            path = os.path.join(train_data_dir, f"replay_data_{iteration}.npz")
+            np.savez_compressed(
+                path,
+                labels=self.label_buffer,
+                frames=self.frame_buffer,
+                # Convert events to a NumPy array with dtype=object
+                events=np.array(self.events_buffer, dtype=object)
+            )
             self.buffer_position = 0
-            
+
+    async def on_unit_created(self, unit):
+        # Log the event
+        self.current_events.append({"type": "unit_created", "unit_type": unit.type_id.name})
+
+    async def on_building_construction_started(self, structure):
+        self.current_events.append({"type": "building_started", "structure": structure.type_id.name})
+
+    async def on_building_construction_complete(self, structure):
+        self.current_events.append({"type": "building_complete", "structure": structure.type_id.name})
+
+    async def on_unit_destroyed(self, unit_tag):
+        self.current_events.append({"type": "unit_destroyed", "tag": unit_tag})
+
+    async def on_upgrade_complete(self, upgrade):
+        self.current_events.append({"type": "upgrade_complete", "upgrade_id": upgrade.name})
+
     def get_current_frame(self):
-        # Dummy implementation: capture a screenshot or use game API data
+        # Replace with your real frame capture
         return np.zeros((240, 320, 3), dtype=np.uint8)
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
 import tensorflow as tf
-from tf.keras import Model, Input
-from tf.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, BatchNormalization
+from tensorflow.keras import Model, Input
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, BatchNormalization
 
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
@@ -130,13 +130,17 @@ model.compile(optimizer=optimizer,
               metrics=['accuracy'])
 
 def train_model_in_batches():
-    """Train model in smaller batches"""
+    """Train model in smaller batches with early stopping."""
     print("Starting training...")
+    
+    best_val_loss = float("inf")
+    patience = 2  # Number of epochs to wait without improvement
+    epochs_no_improvement = 0
     
     for epoch in range(EPOCHS):
         print(f"\nEpoch {epoch+1}/{EPOCHS}")
         
-        # Process training and validation data via process_batch
+        # Process training and validation data
         train_generator = process_batch(train_files, 0, len(train_files))
         val_generator = process_batch(val_files, 0, len(val_files))
         
@@ -170,15 +174,31 @@ def train_model_in_batches():
             del x_val, y_val
             gc.collect()
             
-        print(f"\nEpoch {epoch+1} Results:")
-        print(f"Train Loss: {train_loss/train_steps:.4f}")
-        print(f"Train Accuracy: {train_acc/train_steps:.4f}")
-        print(f"Val Loss: {val_loss/val_steps:.4f}")
-        print(f"Val Accuracy: {val_acc/val_steps:.4f}")
+        # Compute average losses & accuracies
+        avg_train_loss = train_loss / train_steps if train_steps else 0
+        avg_train_acc = train_acc / train_steps if train_steps else 0
+        avg_val_loss = val_loss / val_steps if val_steps else 0
+        avg_val_acc = val_acc / val_steps if val_steps else 0
         
-        # Save checkpoint
+        print(f"\nEpoch {epoch+1} Results:")
+        print(f"Train Loss: {avg_train_loss:.4f}")
+        print(f"Train Accuracy: {avg_train_acc:.4f}")
+        print(f"Val Loss: {avg_val_loss:.4f}")
+        print(f"Val Accuracy: {avg_val_acc:.4f}")
+        
+        # Save checkpoint every epoch
         model.save(f"model_checkpoints/checkpoint-epoch-{epoch+1}.keras")
-
+        
+        # Early stopping check
+        if avg_val_loss < (best_val_loss + 0.005):
+            best_val_loss = avg_val_loss
+            epochs_no_improvement = 0
+        else:
+            epochs_no_improvement += 1
+            if epochs_no_improvement >= patience:
+                print(f"Early stopping triggered: no improvement for {patience} epochs.")
+                break
+            
 try:
     train_model_in_batches()
     model.save(f"BasicCNN-Final-{EPOCHS}-epochs-{LEARNING_RATE}-LR.keras")
