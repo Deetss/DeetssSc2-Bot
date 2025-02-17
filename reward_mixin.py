@@ -1,59 +1,76 @@
-from sc2.ids.unit_typeid import UnitTypeId
+from pysc2.lib.features import ScoreCumulative
 
 class RewardMixin:
     def __init__(self, *args, **kwargs):
         # Ensure previous counts exist regardless of inherited base
-        self.previous_army_count = 0
+        self.previous_score = 0
+        self.previous_idle_production_time = 0
+        self.previous_idle_worker_time = 0
+        self.previous_killed_unit_score = 0
+        self.previous_killed_building_score = 0
+        self.previous_action = None
+        self.previous_state = None
+        self.previous_collected_minerals = 0
+        self.previous_collected_vespene = 0
+        self.previous_spent_minerals = 0
+        self.previous_spent_vespene = 0
+        self.previous_army_supply = 0
         self.previous_worker_count = 0
-        self.previous_enemy_army = 0
-        self.previous_enemy_structures = 0
+        self.previous_structure_count = 0
+
         super().__init__(*args, **kwargs)
 
-    def compute_reward(self):
-        reward = 0.0
-        resource_score = 1
-        reward += resource_score
+    def compute_reward(self, obs, current_state):
+        # Gather current score values
+        current_score = obs.observation['score_cumulative'][ScoreCumulative.score]
+        idle_prod_time = obs.observation['score_cumulative'][ScoreCumulative.idle_production_time]
+        idle_worker_time = obs.observation['score_cumulative'][ScoreCumulative.idle_worker_time]
+        killed_units = obs.observation['score_cumulative'][ScoreCumulative.killed_value_units]
+        killed_structures = obs.observation['score_cumulative'][ScoreCumulative.killed_value_structures]
+        collected_minerals = obs.observation['score_cumulative'][ScoreCumulative.collected_minerals]
+        collected_vespene = obs.observation['score_cumulative'][ScoreCumulative.collected_vespene]
+        spent_minerals = obs.observation['score_cumulative'][ScoreCumulative.spent_minerals]
+        spent_vespene = obs.observation['score_cumulative'][ScoreCumulative.spent_vespene]
 
-        if self.supply_left <= 0:
-            reward -= 1.0
-        else:
-            reward += 0.2
+        # Compute differences
+        diff_score = current_score - self.previous_score
+        diff_idle_prod = idle_prod_time - self.previous_idle_production_time
+        diff_idle_worker = idle_worker_time - self.previous_idle_worker_time
+        diff_killed_units = killed_units - self.previous_killed_unit_score
+        diff_killed_structs = killed_structures - self.previous_killed_building_score
+        diff_collected_m = collected_minerals - self.previous_collected_minerals
+        diff_collected_v = collected_vespene - self.previous_collected_vespene
+        diff_spent_m = spent_minerals - self.previous_spent_minerals
+        diff_spent_v = spent_vespene - self.previous_spent_vespene
 
-        if self.supply_workers < 20:
-            reward -= 1.0
+        # Assign rewards (positive or negative)
+        reward = 0
+        reward += diff_score * 0.001
+        reward -= diff_idle_prod * 0.05
+        reward -= diff_idle_worker * 0.05
+        reward += diff_killed_units * 0.04
+        reward += diff_killed_structs * 0.1
+        reward += diff_collected_m * 0.0001
+        reward += diff_collected_v * 0.0001
+        reward += diff_spent_m * 0.0001
+        reward += diff_spent_v * 0.0001
 
-        if self.supply_army < 10:
-            reward -= 1.0
+        # Big reward or penalty for game end
+        if obs.last():
+            if obs.reward > 0:
+                reward += 10
+            else:
+                reward -= 10
 
-        if (self.supply_cap - self.supply_left) > 0:
-            # Compute army count from all_units filtering for army units
-            army_units = self.all_units.filter(lambda u: u.can_attack).amount
-            reward += (army_units / (self.supply_cap - self.supply_left))
-
-        if self.townhalls and self.townhalls.amount >= 2:
-            reward += 0.5
-
-        # Idle workers
-        idle_workers = self.workers.idle.amount
-        reward -= 0.05 * idle_workers
-
-        # Lost army
-        current_army = self.all_units.filter(lambda u: u.can_attack).amount
-        lost_army = max(0, self.previous_army_count - current_army)
-        reward -= 0.5 * lost_army
-
-        # Lost workers
-        current_worker_count = self.workers.amount
-        lost_workers = max(0, self.previous_worker_count - current_worker_count)
-        reward -= 1.0 * lost_workers
-
-        # Enemy kills
-        current_enemy_army = self.enemy_units.filter(lambda u: u.can_attack).amount
-        killed_enemy_army = max(0, self.previous_enemy_army - current_enemy_army)
-        reward += 0.5 * killed_enemy_army
-
-        current_enemy_structures = self.enemy_structures.amount
-        destroyed_structures = max(0, self.previous_enemy_structures - current_enemy_structures)
-        reward += 1.0 * destroyed_structures
+        # Update previous values
+        self.previous_score = current_score
+        self.previous_idle_production_time = idle_prod_time
+        self.previous_idle_worker_time = idle_worker_time
+        self.previous_killed_unit_score = killed_units
+        self.previous_killed_building_score = killed_structures
+        self.previous_collected_minerals = collected_minerals
+        self.previous_collected_vespene = collected_vespene
+        self.previous_spent_minerals = spent_minerals
+        self.previous_spent_vespene = spent_vespene
 
         return reward

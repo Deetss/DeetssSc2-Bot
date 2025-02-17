@@ -1,116 +1,140 @@
-import numpy as np
-import cv2
-import os
-import platform
 from pathlib import Path
+from pysc2.agents import base_agent
+from pysc2.env import sc2_env
+from pysc2.lib import actions, features, units
+import numpy as np
+from absl import app
 
-from loguru import logger
-from dotenv import load_dotenv
-load_dotenv()
+from qlearn import QLearningTable
+from reward_utils import compute_reward
 
-from sc2.main import run_replay
-from sc2.observer_ai import ObserverAI
-from sc2.ids.unit_typeid import UnitTypeId
+_PLAYER_RELATIVE = features.SCREEN_FEATURES.player_relative.index
+_PLAYER_SELF = 1
+_UNIT_TYPE = features.SCREEN_FEATURES.unit_type.index
+_PLAYER_ID = features.SCREEN_FEATURES.player_id.index
 
-from reward_mixin import RewardMixin
+_OVERLORD = units.Zerg.Overlord
+_HATCHERY = units.Zerg.Hatchery
 
-train_data_dir = "./train_data/"
+KILL_UNIT_REWARD = 0.2
+KILL_BUILDING_REWARD = 0.5
 
-class ObserverBot(RewardMixin, ObserverAI):
+REWARD_PER_MINERAL = 0.0001
+REWARD_PER_GAS = 0.0001
+
+class ObserverAgent(base_agent.BaseAgent):
     def __init__(self):
-        super().__init__()
-        self.buffer_size = 1_000
-        self.buffer_position = 0
+        super(ObserverAgent, self).__init__()
+        self.previous_killed_unit_score = 0
+        self.previous_killed_building_score = 0
+        self.previous_action = None
+        self.previous_state = None
+        self.previous_minerals = None
+        self.previous_gas = None
+        # Initialize Q-learning model once with available smart actions.
+        self.q_table = QLearningTable(actions=list(range(len(actions.FUNCTIONS))))
 
-        # Frame + label buffers
-        self.label_buffer = np.zeros((self.buffer_size, 4), dtype=np.float32)
-        self.frame_buffer = np.zeros((self.buffer_size, 176, 200, 3), dtype=np.float32)
+    def transformLocation(self, x, x_distance, y, y_distance):
+        if not self.base_top_left:
+            return [x - x_distance, y - y_distance]
+        return [x + x_distance, y + y_distance]
+
+    def step(self, obs):
+        super(ObserverAgent, self).step(obs)
+
+        player_y, player_x = (obs.observation['feature_minimap'][_PLAYER_RELATIVE] == _PLAYER_SELF).nonzero()
+        self.base_top_left = 1 if player_y.any() and player_y.mean() <= 31 else 0
+        smart_actions = actions.FUNCTIONS  # for action lookup; q_table is already set.
+        unit_type = obs.observation['feature_screen'][_UNIT_TYPE]
+        depot_y, depot_x = (unit_type == _OVERLORD).nonzero()
+        supply_depot_count = 1 if depot_y.any() else 0
+
+        hatchery_y, hatchery_x = (unit_type == _HATCHERY).nonzero()
+        hatchery_count = 1 if hatchery_y.any() else 0
+
+        supply_limit = obs.observation['player'][4]
+        army_supply = obs.observation['player'][5]
+        killed_unit_score = obs.observation['score_cumulative'][5]
+        killed_building_score = obs.observation['score_cumulative'][6]
+        current_minerals = obs.observation['player'][1]
+        current_gas = obs.observation['player'][2]
+
+        current_state = [
+            supply_depot_count,
+            hatchery_count,
+            supply_limit,
+            army_supply,
+            killed_unit_score,
+            killed_building_score,
+            current_minerals,
+            current_gas,
+        ]
         
-        # Event log buffer: each entry holds the events in that frame
-        self.events_buffer = [list() for _ in range(self.buffer_size)]
-        self.current_events = []
+        reward = compute_reward(self, obs, current_state)
 
-    async def on_step(self, iteration):
-        # 1. Get the current frame
-        frame = self.get_current_frame()
-        processed_frame = cv2.resize(frame, (200, 176)).astype(np.float32) / 255.0
-        
-        # 2. Decide or retrieve an action index here
-        action_index = 3 # default to wait
-        
-        # Check for economy-related events
-        if any(event["type"] == "unit_created" and event["unit_type"] in ["DRONE", "OVERLORD"] for event in self.current_events):
-            action_index = 0  # economy
+        # Award a victory bonus or defeat penalty if the game is over.
+        if obs.last() and obs.reward > 0:
+            VICTORY_BONUS = 10  
+            reward += VICTORY_BONUS
+        elif obs.last() and obs.reward < 0:
+            DEFEAT_PENALTY = -10
+            reward += DEFEAT_PENALTY
 
-        # Check for army-related events
-        elif any(event["type"] == "unit_created" and event["unit_type"] in ["ZERGLING", "ROACH", "HYDRALISK"] for event in self.current_events):
-            action_index = 1  # build army
+        print(f"Reward: {reward}")
 
-        # Building construction
-        elif any(event["type"] == "building_started" for event in self.current_events):
-            action_index = 0 # economy
+        # Update Q-learning model with the transition from the previous step.
+        if self.previous_action is not None:
+            self.q_table.learn(str(self.previous_state),
+                               self.previous_action,
+                               reward,
+                               str(current_state))
 
-        # You'll need to expand this logic to cover all possible actions
-        label = np.eye(4, dtype=np.float32)[action_index]
+        # Instead of taking an action, always record and return no_op.
+        no_op = actions.FUNCTIONS.no_op.id
+        print(f"Recorded state: {current_state} with reward: {reward}. Using no_op.")
 
-        # 3. Store the frame, label, and any gathered events
-        self.label_buffer[self.buffer_position] = label
-        self.frame_buffer[self.buffer_position] = processed_frame
-        self.events_buffer[self.buffer_position] = self.current_events[:]
+        self.previous_killed_unit_score = killed_unit_score
+        self.previous_killed_building_score = killed_building_score
+        self.previous_minerals = current_minerals
+        self.previous_gas = current_gas
+        self.previous_state = current_state
+        self.previous_action = no_op
 
-        self.buffer_position += 1
-        self.current_events.clear()
+        # In replay mode the returned action is essentially ignored.
+        return actions.FunctionCall(no_op, [])
 
-        # 4. Save if buffer is full
-        if self.buffer_position >= self.buffer_size:
-            path = os.path.join(train_data_dir, f"replay_data_{iteration}.npz")
-            np.savez_compressed(
-                path,
-                labels=self.label_buffer,
-                frames=self.frame_buffer,
-                # Convert events to a NumPy array with dtype=object
-                events=np.array(self.events_buffer, dtype=object)
-            )
-            self.buffer_position = 0
-
-    async def on_unit_created(self, unit):
-        # Log the event
-        self.current_events.append({"type": "unit_created", "unit_type": unit.type_id.name})
-
-    async def on_building_construction_started(self, structure):
-        self.current_events.append({"type": "building_started", "structure": structure.type_id.name})
-
-    async def on_building_construction_complete(self, structure):
-        self.current_events.append({"type": "building_complete", "structure": structure.type_id.name})
-
-    async def on_unit_destroyed(self, unit_tag):
-        self.current_events.append({"type": "unit_destroyed", "tag": unit_tag})
-
-    async def on_upgrade_complete(self, upgrade):
-        self.current_events.append({"type": "upgrade_complete", "upgrade_id": upgrade.name})
-
-    def get_current_frame(self):
-        # Replace with your real frame capture
-        return np.zeros((240, 320, 3), dtype=np.uint8)
-
-if __name__ == "__main__":
-    my_observer_ai = ObserverBot()
+def main(unused_argv):
+    # Set the path to your replay file here.
     replay_name = "raynor.SC2Replay"
     home_replay_folder = Path.home() / "OneDrive" / "Documents" / "StarCraft II" / "Replays"
     replay_path = home_replay_folder / replay_name
-
-    logger.info(f"Checking replay path: {replay_path}")
-
-    if not replay_path.is_file():
-        logger.error(f"Replay file does not exist: {replay_path}")
-        raise FileNotFoundError(f"Replay file does not exist: {replay_path}")
-
-    logger.info(f"Replay file found: {replay_path}")
+    
+    agent = ObserverAgent()
     try:
-        # Convert the replay path to a POSIX string to avoid issues with spaces.
-        replay_path_str = replay_path.as_posix()
-        logger.info(f"Using replay path string: {replay_path_str}")
-        run_replay(ai=my_observer_ai, replay_path=replay_path_str, observed_id=2)
-        logger.info("Replay started successfully")
-    except Exception as e:
-        logger.error(f"Failed to start replay: {e}")
+        with sc2_env.SC2Env(
+            replay_path=replay_path,
+            agent_interface_format=features.AgentInterfaceFormat(
+                feature_dimensions=features.Dimensions(screen=84, minimap=64),
+                use_feature_units=True),
+            step_mul=16,
+            game_steps_per_episode=0,
+            visualize=True) as env:
+
+            agent.setup(env.observation_spec(), env.action_spec())
+            timesteps = env.reset()
+            agent.reset()
+
+            while True:
+                # Call step to update the Q-table from the replay data.
+                agent.step(timesteps[0])
+                if timesteps[0].last():
+                    break
+                timesteps = env.step([])
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Save Q-learning model state on session exit.
+        agent.q_table.save_model("q_table.csv")
+
+if __name__ == "__main__":
+    app.run(main)
