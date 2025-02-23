@@ -1,211 +1,107 @@
-import os
-import random
-import numpy as np
-import psutil
-from datetime import datetime
-import gc
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-
-import tensorflow as tf
-from tensorflow.keras import Model, Input
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dropout, Flatten, Dense, BatchNormalization
-
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    print("GPUs found:", gpus)
-    # Optionally, enable memory growth for each GPU.
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
-else:
-    print("No GPU found!")
-
-# Define missing constants and variables
-BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-EPOCHS = 10
-
-# Directory containing training files (adjust this path as needed)
-train_data_dir = "./train_data/"
-
-# Get list of all files and split into training and validation lists (90/10 split)
-all_files = os.listdir(train_data_dir)
-random.shuffle(all_files)
-split_idx = int(0.9 * len(all_files))
-train_files = all_files[:split_idx]
-val_files = all_files[split_idx:]
-
-def print_memory_usage():
-    """Monitor memory usage"""
-    process = psutil.Process(os.getpid())
-    print(f"Memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-
-def create_model():
-    """Create model using Functional API with proper input layer"""
-    inputs = Input(shape=(176, 200, 3))
-    
-    # First conv block
-    x = Conv2D(32, (3,3), padding='same', activation='relu')(inputs)
-    x = BatchNormalization()(x)
-    x = MaxPooling2D(pool_size=(2,2))(x)
-    x = Dropout(0.2)(x)
-    
-    # Second conv block
-    x = Conv2D(64, (3,3), padding='same', activation='relu')(x)
-    x = BatchNormalization()(x)
-    x = MaxPooling2D(pool_size=(2,2))(x)
-    x = Dropout(0.2)(x)
-    
-    # Third conv block
-    x = Conv2D(64, (3,3), activation='relu')(x)
-    x = BatchNormalization()(x)
-    x = MaxPooling2D(pool_size=(2,2))(x)
-    x = Dropout(0.2)(x)
-    
-    # Dense layers
-    x = Flatten()(x)
-    x = Dense(256, activation='relu')(x)
-    x = BatchNormalization()(x)
-    x = Dropout(0.5)(x)
-    outputs = Dense(4, activation='softmax')(x)
-    
-    return Model(inputs=inputs, outputs=outputs)
-
-def data_generator(files, batch_size=32):
-    """Generator for memory-efficient data loading"""
-    while True:
-        random.shuffle(files)
-        for i in range(0, len(files), batch_size):
-            batch_files = files[i:i + batch_size]
-            batch_data = list(process_batch(batch_files, 0, len(batch_files)))
-            if batch_data:
-                x = np.concatenate([x for x, _ in batch_data], axis=0)
-                y = np.concatenate([y for _, y in batch_data], axis=0)
-                yield x, y
-
-def process_batch(files, start, end):
-    """Process data in smaller batches with memory tracking"""
-    batch_data = []
-    total_samples = 0
-    
-    print(f"Processing files {start} to {end}")
-    for file in files[start:end]:
-        try:
-            data = np.load(os.path.join(train_data_dir, file))
-
-            # Get labels and frames from the dictionary
-            labels = data['labels']
-            frames = data['frames']
-
-            # Process each frame and label pair
-            for label, frame in zip(labels, frames):
-                if frame.shape == (176, 200, 3):
-                    # Frame is already normalized in observer.py
-                    sample = (label, frame)
-                    batch_data.append(sample)
-                    total_samples += 1
-                    
-                if total_samples >= BATCH_SIZE:
-                    x = np.array([i[1] for i in batch_data])
-                    y = np.array([i[0] for i in batch_data])
-                    yield x, y
-                    batch_data = []
-                    total_samples = 0
-                    gc.collect()
-        except Exception as e:
-            print(f"Error processing {file}: {e}")
-            continue
-    
-    if batch_data:
-        x = np.array([i[1] for i in batch_data])
-        y = np.array([i[0] for i in batch_data])
-        yield x, y
-
-# Build model and compile
-model = create_model()
-optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
-model.compile(optimizer=optimizer,
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
-
-def train_model_in_batches():
-    """Train model in smaller batches with early stopping."""
-    print("Starting training...")
-    
-    best_val_loss = float("inf")
-    patience = 2  # Number of epochs to wait without improvement
-    epochs_no_improvement = 0
-    
-    for epoch in range(EPOCHS):
-        print(f"\nEpoch {epoch+1}/{EPOCHS}")
+class DuelingNetwork(nn.Module):
+    def __init__(self, num_actions, structured_size, action_coord_sizes):
+        super(DuelingNetwork, self).__init__()
         
-        # Process training and validation data
-        train_generator = process_batch(train_files, 0, len(train_files))
-        val_generator = process_batch(val_files, 0, len(val_files))
+        # Screen branch for 3-channel RGB input.
+        self.screen_conv = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(4)  # for 128x128 -> approx. 32x32 output
+        )
+        self.screen_pool = nn.AdaptiveAvgPool2d((32, 32))
         
-        train_steps = 0
-        train_loss = 0
-        train_acc = 0
+        # Minimap branch (assuming 64x64 input).
+        self.minimap_conv = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(8)  # for 64x64 -> approx. 8x8 output
+        )
+        self.minimap_pool = nn.AdaptiveAvgPool2d((8, 8))
         
-        # Train on batches
-        for x_batch, y_batch in train_generator:
-            history = model.train_on_batch(x_batch, y_batch)
-            train_loss += history[0]
-            train_acc += history[1]
-            train_steps += 1
+        self.fc_structured = nn.Sequential(
+            nn.Linear(structured_size, 64),
+            nn.ReLU(),
+        )
+        
+        # Dynamically compute the combined feature size.
+        with torch.no_grad():
+            dummy_screen = torch.zeros(1, 3, 128, 128)
+            dummy_minimap = torch.zeros(1, 3, 64, 64)
+            dummy_structured = torch.zeros(1, structured_size)
+            x_screen = self.screen_conv(dummy_screen)
+            x_screen = self.screen_pool(x_screen).view(1, -1)
+            x_minimap = self.minimap_conv(dummy_minimap)
+            x_minimap = self.minimap_pool(x_minimap).view(1, -1)
+            x_struct = self.fc_structured(dummy_structured)
+            combined_input_size = x_screen.size(1) + x_minimap.size(1) + x_struct.size(1)
+        
+        self.combined_fc = nn.Sequential(
+            nn.Linear(combined_input_size, 256),
+            nn.ReLU(),
+        )
+        
+        # Dueling outputs.
+        self.value = nn.Linear(256, 1)
+        self.advantage = nn.Linear(256, num_actions)
+        
+        # Coordinate heads for each action.
+        self.action_coord_heads = nn.ModuleDict({
+            str(action): nn.Linear(256, output_dim)
+            for action, output_dim in action_coord_sizes.items()
+        })
+
+    def forward(self, screen, minimap, structured, chosen_action=None):
+        # Remove extra singleton dim.
+        if screen.dim() == 5:
+            screen = screen.squeeze(1)
+        if minimap.dim() == 5:
+            minimap = minimap.squeeze(1)
             
-            if train_steps % 10 == 0:
-                print(f"Step {train_steps}: loss = {train_loss/train_steps:.4f}, acc = {train_acc/train_steps:.4f}")
-                
-            del x_batch, y_batch
-            gc.collect()
-            
-        # Validate
-        val_steps = 0
-        val_loss = 0
-        val_acc = 0
+        # Ensure screen is RGB.
+        if screen.size(1) != 3:
+            screen = screen.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+        # Ensure minimap is RGB.
+        if minimap.size(1) != 3:
+            minimap = minimap.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
         
-        for x_val, y_val in val_generator:
-            val_history = model.test_on_batch(x_val, y_val)
-            val_loss += val_history[0]
-            val_acc += val_history[1]
-            val_steps += 1
-            del x_val, y_val
-            gc.collect()
-            
-        # Compute average losses & accuracies
-        avg_train_loss = train_loss / train_steps if train_steps else 0
-        avg_train_acc = train_acc / train_steps if train_steps else 0
-        avg_val_loss = val_loss / val_steps if val_steps else 0
-        avg_val_acc = val_acc / val_steps if val_steps else 0
+        # Process screen branch.
+        x_screen = self.screen_conv(screen)
+        x_screen = self.screen_pool(x_screen)
+        x_screen = x_screen.view(x_screen.size(0), -1)
+
+        # Process minimap branch.
+        x_minimap = self.minimap_conv(minimap)
+        x_minimap = self.minimap_pool(x_minimap)
+        x_minimap = x_minimap.view(x_minimap.size(0), -1)
+
+        # Process structured input.
+        x_struct = self.fc_structured(structured)
         
-        print(f"\nEpoch {epoch+1} Results:")
-        print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Train Accuracy: {avg_train_acc:.4f}")
-        print(f"Val Loss: {avg_val_loss:.4f}")
-        print(f"Val Accuracy: {avg_val_acc:.4f}")
+        # Combine features.
+        combined = torch.cat([x_screen, x_minimap, x_struct], dim=1)
+        combined = self.combined_fc(combined)
         
-        # Save checkpoint every epoch
-        model.save(f"model_checkpoints/checkpoint-epoch-{epoch+1}.keras")
+        # Q-value computations.
+        val = self.value(combined)
+        adv = self.advantage(combined)
+        q_values = val + adv - adv.mean(dim=1, keepdim=True)
         
-        # Early stopping check
-        if avg_val_loss < (best_val_loss + 0.005):
-            best_val_loss = avg_val_loss
-            epochs_no_improvement = 0
+        if chosen_action is not None:
+            coord_out = self.action_coord_heads[str(chosen_action)](combined)
+            return q_values, {"coord": coord_out}
         else:
-            epochs_no_improvement += 1
-            if epochs_no_improvement >= patience:
-                print(f"Early stopping triggered: no improvement for {patience} epochs.")
-                break
-            
-try:
-    train_model_in_batches()
-    model.save(f"BasicCNN-Final-{EPOCHS}-epochs-{LEARNING_RATE}-LR.keras")
-    print("Training completed successfully")
-except Exception as e:
-    print(f"Training failed: {e}")
-finally:
-    print_memory_usage()
-    gc.collect()
-    tf.keras.backend.clear_session()
+            coord_all = {action: head(combined) for action, head in self.action_coord_heads.items()}
+            return q_values, {"coord_all": coord_all}
+
+def create_dueling_model(num_actions, structured_size=31, action_coord_sizes=None):
+    if action_coord_sizes is None:
+        action_coord_sizes = {i: 2 for i in range(num_actions)}
+    return DuelingNetwork(num_actions, structured_size, action_coord_sizes)

@@ -1,0 +1,90 @@
+from pysc2.env import sc2_env
+from pysc2.lib import features, actions
+import random
+import os
+import multiprocessing
+import signal
+from absl import flags, app
+from agent.zerg_agent import ZergAgent
+import sys
+import numpy as np
+import gc
+
+from agent.config import NUM_WORKERS, NUM_EPISODES
+
+_original_unpack_rgb_image = features.Feature.unpack_rgb_image
+
+def patched_unpack_rgb_image(plane):
+    if plane.bits_per_pixel != 24:
+        # Return a dummy RGB image with the expected dimensions.
+        return np.zeros((plane.height, plane.width, 3), dtype=np.uint8)
+    return _original_unpack_rgb_image(plane)
+
+features.Feature.unpack_rgb_image = patched_unpack_rgb_image
+
+def train_agent(worker_id):
+    flags.FLAGS(sys.argv)
+    cool_adjectives = ["Swift", "Mighty", "Slick"]
+    animals = ["Cheetah", "Panther", "Eagle"]
+    agent_name = f"{random.choice(cool_adjectives)}_{random.choice(animals)}_{worker_id}"
+    agent = ZergAgent(worker_id, agent_name=agent_name)
+    
+    with sc2_env.SC2Env(
+            map_name="AbyssalReef",
+            players=[
+                sc2_env.Agent(sc2_env.Race.zerg),
+                sc2_env.Bot(sc2_env.Race.random, sc2_env.Difficulty.harder)
+            ],
+            agent_interface_format=features.AgentInterfaceFormat(
+                action_space=actions.ActionSpace.FEATURES,
+                feature_dimensions=features.Dimensions(screen=(84, 84), minimap=(64, 64)),
+                rgb_dimensions=features.Dimensions(screen=(256, 192), minimap=(128, 128)),
+                use_feature_units=True,
+            ),
+            step_mul=16,
+            game_steps_per_episode=0,
+            visualize=True) as env:
+        agent.setup(env.observation_spec(), env.action_spec())
+        for episode in range(NUM_EPISODES):
+            timesteps = env.reset()
+            agent.reset()
+            while True:
+                step_actions = [agent.step(timesteps[0])]
+                if timesteps[0].last():
+                    agent.wins += int(timesteps[0].reward > 0)
+                    agent.losses += int(timesteps[0].reward <= 0)
+                    break
+                timesteps = env.step(step_actions)
+            if (episode + 1) % agent.REFRESH_INTERVAL == 0:
+                agent.refresh_model()
+        agent.log_results()
+
+def main(unused_argv):
+    processes = []
+    
+    def handle_sigint(signum, frame):
+        print("SIGINT received, terminating workers...")
+        for p in processes:
+            p.terminate()
+        # Force garbage collection after terminating processes.
+        gc.collect()
+        exit(0)
+    
+    signal.signal(signal.SIGINT, handle_sigint)
+    for worker_id in range(NUM_WORKERS):
+        print(f"Starting worker {worker_id}")
+        p = multiprocessing.Process(target=train_agent, args=(worker_id,))
+        p.start()
+        processes.append(p)
+    for p in processes:
+        p.join(18000)
+        if p.is_alive():
+            print("A process is taking too long; terminating it.")
+            p.terminate()
+    # Ensure all processes are joined and initiate extra garbage collection.
+    for p in processes:
+        p.join()
+    gc.collect()
+
+if __name__ == "__main__":
+    app.run(main)

@@ -1,8 +1,9 @@
 pysc2
-numpy
+numpy<2
 pandas
 opencv-python
+torch-directml
 tensorboard
-tensorflow
 python-dotenv
 protobuf<3.20
+matplotlib

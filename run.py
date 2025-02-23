@@ -22,7 +22,7 @@ from sc2.ids.upgrade_id import UpgradeId
 from sc2.data import ActionResult, Attribute, Race
 from sc2.bot_ai import BotAI
 
-from reward_mixin import RewardMixin
+from agent.reward_mixin import RewardMixin
 
 from keras.models import load_model
 
