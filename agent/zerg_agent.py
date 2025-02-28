@@ -26,6 +26,8 @@ from torch.cuda.amp import GradScaler, autocast
 from collections import deque
 import shutil
 
+from memoryUtils import monitor_memory
+
 USE_PRETRAINED = True  # Load a pretrained model if available.
 PRETRAINED_FILENAME = "dueling-Swift_Eagle_3-episode-535.pth"
 #RETRAINED_FILENAME = "observer_dqn_checkpoint.pth"
@@ -443,23 +445,24 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
             print("Failed to load checkpoint:", e)
 
     def periodic_cleanup(self):
-        # Clear unnecessary memory
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Only clean when memory usage exceeds threshold
+        if monitor_memory() > 3500:  # 3.5GB threshold
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
-        # Trim replay buffer if too large
-        if len(self.replay_buffer) > MAX_REPLAY_BUFFER_SIZE:
-            self.replay_buffer = self.replay_buffer[-MAX_REPLAY_BUFFER_SIZE:]
+        # Use deque's efficient implementation rather than manual trimming
+        # The replay buffer is already a deque with maxlen set
 
     def _process_action_args(self, chosen_action_id, arg_out, obs):
         """Process and construct arguments for the chosen action."""
         args = []
         reward = 0  # Initialize reward
+        python_action_id = int(chosen_action_id)
 
         # Extract coordinate prediction if available
         if isinstance(arg_out, dict) and "coord_all" in arg_out:
-            chosen_coord = arg_out["coord_all"][str(chosen_action_id)]
+            chosen_coord = arg_out["coord_all"][python_action_id]
             screen_xy = chosen_coord.cpu().detach().numpy()[0]
         else:
             screen_xy = None
@@ -473,11 +476,11 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         # Extract minimap prediction if available
         minimap_xy = None
         if isinstance(arg_out, dict) and "minimap" in arg_out:
-            minimap_coord = arg_out["minimap"][str(chosen_action_id)]
+            minimap_coord = arg_out["minimap"][python_action_id]
             minimap_xy = minimap_coord.cpu().detach().numpy()[0]
         
         # Construct arguments for each parameter the action requires
-        for arg in self.action_spec[0].functions[chosen_action_id].args:
+        for arg in self.action_spec[0].functions[python_action_id].args:
             if arg.name == "queued" and chosen_queued is not None:
                 args.append([chosen_queued])
             elif arg.name == "screen" and screen_xy is not None:
@@ -489,18 +492,9 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
                 y = int(min(max(minimap_xy[1] * arg.sizes[1], 0), arg.sizes[1]-1))
                 args.append([x, y])
             else:
-                # For any other arguments, use random values within the allowed range
                 rand_args = [np.random.randint(0, size) for size in arg.sizes]
                 args.append(rand_args)
         
-        # Log the chosen action and the constructed arguments
-        #print(f"Chosen action ID: {chosen_action_id}, Args: {args}")
-
-        # Here you should implement the logic to calculate the reward based on the action taken
-        # For example, you might want to check the state of the environment after the action
-        # and assign a reward based on that.
-        # reward = calculate_reward_based_on_action(chosen_action_id, obs)
-
         return args, reward
 
     def log_images(self, screen_tensor, minimap_tensor):

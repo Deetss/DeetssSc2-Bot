@@ -14,6 +14,7 @@ import torch
 import shutil
 
 from agent.config import NUM_WORKERS, NUM_EPISODES
+from memoryUtils import monitor_memory
 
 _original_unpack_rgb_image = features.Feature.unpack_rgb_image
 
@@ -31,11 +32,6 @@ def patched_unpack_rgb_image(plane):
     return _original_unpack_rgb_image(plane)
 
 features.Feature.unpack_rgb_image = patched_unpack_rgb_image
-
-def monitor_memory():
-    process = psutil.Process()
-    memory_info = process.memory_info()
-    return memory_info.rss / 1024 / 1024  # MB
 
 def train_agent(worker_id):
     flags.FLAGS(sys.argv)
@@ -83,11 +79,10 @@ def train_agent(worker_id):
             if (episode + 1) % agent.REFRESH_INTERVAL == 0:
                 agent.refresh_model()
                 agent.periodic_cleanup()  # Extra cleanup after model refresh
-                gc.collect()
 
             if episode % 10 == 0:
                 memory_usage = monitor_memory()
-                if memory_usage > 4000:  # 4GB threshold
+                if memory_usage > 3500:  # 4GB threshold
                     gc.collect()
                     torch.cuda.empty_cache()
 
