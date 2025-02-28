@@ -10,19 +10,25 @@ from torch.utils.tensorboard import SummaryWriter
 
 import re
 from agent.loss import CustomLoss
-from model import create_dueling_model  # Use the new dueling model
-from agent.a2c import create_a2c_model
+from agent.a2c import a2c_train_step, create_a2c_model
 from agent.config import DEVICE as device
 from agent.reward_mixin import RewardMixin
 
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 
-from agent.config import REFRESH_INTERVAL, LR
+from agent.config import REFRESH_INTERVAL, LR, MAX_REPLAY_BUFFER_SIZE
+
+import cProfile
+import pstats
+from torch.cuda.amp import GradScaler, autocast
+from collections import deque
+import shutil
 
 USE_PRETRAINED = True  # Load a pretrained model if available.
-#PRETRAINED_FILENAME = "dueling-Slick_Eagle_0-episode-245.pth"
-PRETRAINED_FILENAME = "observer_dqn_checkpoint.pth"
+PRETRAINED_FILENAME = "dueling-Swift_Eagle_3-episode-535.pth"
+#RETRAINED_FILENAME = "observer_dqn_checkpoint.pth"
 
 class ZergAgent(RewardMixin, base_agent.BaseAgent):
     def __init__(self, worker_id, agent_name=None, use_pretrained=USE_PRETRAINED, pretrained_filename=PRETRAINED_FILENAME):
@@ -30,6 +36,7 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         self.use_pretrained = use_pretrained
         self.worker_id = worker_id
         self.REFRESH_INTERVAL = REFRESH_INTERVAL
+        # Generate a random name if none provided
         self.agent_name = agent_name if agent_name else f"agent_{worker_id}"
         # Create a dedicated checkpoint folder for this agent.
         self.checkpoint_dir = os.path.join("model_checkpoints", self.agent_name)
@@ -44,7 +51,7 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         
         self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
         self.batch_size = 16
-        self.replay_buffer = []  # to store (state, action, reward, next_state)
+        self.replay_buffer = deque(maxlen=MAX_REPLAY_BUFFER_SIZE)
         
         # Variables for logging / performance.
         self.total_reward = 0
@@ -56,61 +63,70 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         # Initialize TensorBoard SummaryWriter.
         self.writer = SummaryWriter(log_dir=os.path.join("runs", self.agent_name))
         
-        # Attempt to load the latest checkpoint for this agent.
+        # Modified checkpoint loading logic
         if self.use_pretrained:
             if pretrained_filename and os.path.exists(pretrained_filename):
                 print(f"Loading specified checkpoint from {pretrained_filename}")
                 self._load_checkpoint(pretrained_filename)
-            elif os.path.exists(self.checkpoint_dir):
-                pattern = re.compile(rf"dueling-{self.agent_name}-episode-(\d+)\.pth")
-                checkpoints = []
-                for fname in os.listdir(self.checkpoint_dir):
-                    match = pattern.match(fname)
+            else:
+                # Look for latest checkpoint with this agent's name
+                latest_checkpoint = self._find_latest_checkpoint()
+                if latest_checkpoint:
+                    print(f"Loading latest checkpoint: {latest_checkpoint}")
+                    self._load_checkpoint(latest_checkpoint)
+                    # Extract episode number from filename
+                    match = re.search(r'episode-(\d+)', latest_checkpoint)
                     if match:
-                        episode_num = int(match.group(1))
-                        checkpoints.append((episode_num, os.path.join(self.checkpoint_dir, fname)))
-                if checkpoints:
-                    latest_episode, latest_checkpoint_path = max(checkpoints, key=lambda x: x[0])
-                    print(f"Loading latest checkpoint {latest_checkpoint_path}")
-                    self._load_checkpoint(latest_checkpoint_path)
-                    self.epsilon = 0.1
-                    self.episode_count = latest_episode
+                        self.episode_count = int(match.group(1))
+                    self.epsilon = 0.1  # Reduced exploration for pretrained model
                 else:
                     print("No checkpoints found. Starting with a random model.")
-            else:
-                print("No checkpoint directory found. Starting with a random model.")
         else:
             print("use_pretrained=False. Starting with a random model.")
 
-    def extract_structured_obs(self, obs):
-        """Gather more observation data (control groups, selected units, etc.)."""
-        player_data = obs.observation.get("player", [])
-        control_groups = obs.observation.get("control_groups", [])
-        single_select = obs.observation.get("single_select", [])
-        multi_select = obs.observation.get("multi_select", [])
-        cargo = obs.observation.get("cargo", [])
-        build_queue = obs.observation.get("build_queue", [])
+        self.prev_worker_count = 0
+        self.prev_army_count = 0
+        self.prev_base_count = 0  # We'll still need to track this separately
+        self.episode_step_count = 0  # Initialize step count
 
-        # Convert each to a flat array. Adjust dimensions as needed.
-        cg_flat = np.array(control_groups).flatten() if len(control_groups) else []
-        ss_flat = np.array(single_select).flatten() if len(single_select) else []
-        ms_flat = np.array(multi_select).flatten() if len(multi_select) else []
-        cr_flat = np.array(cargo).flatten() if len(cargo) else []
-        bq_flat = np.array(build_queue).flatten() if len(build_queue) else []
-
-        combined = np.concatenate([
-            np.array(player_data).flatten(),
-            cg_flat, ss_flat, ms_flat, cr_flat, bq_flat
-        ]).astype(np.float32)
-
-        desired_size = 31
+    def extract_full_structured_obs(self, obs):
+        """Extracts a wider set of features from the observation dictionary."""
+        keys_to_use = [
+            "player",
+            "control_groups",
+            "single_select",
+            "multi_select",
+            "cargo",
+            "build_queue",
+            "production_queue",
+            "last_actions",
+            "cargo_slots_available",
+            "home_race_requested",
+            "away_race_requested",
+        ]
+        obs_list = []
+        for key in keys_to_use:
+            value = obs.observation.get(key, None)
+            if value is None:
+                continue
+            try:
+                flat = np.array(value).flatten()
+                obs_list.append(flat)
+            except Exception as e:
+                print(f"Skipping {key}: {e}")
+        if not obs_list:
+            return np.zeros((31,), dtype=np.float32)  # or another default vector
+        combined = np.concatenate(obs_list).astype(np.float32)
+        
+        # Adjust to the fixed size your model expects.
+        desired_size = 31  # update this to match your model's input dimensions
         if combined.size < desired_size:
             padded = np.zeros((desired_size,), dtype=np.float32)
             padded[:combined.size] = combined
             combined = padded
         elif combined.size > desired_size:
             combined = combined[:desired_size]
-
+        
         return combined
 
     def refresh_model(self, checkpoint_dir="model_checkpoints"):
@@ -210,185 +226,170 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         return img_tensor
 
     def step(self, obs):
+        """Simplified step function focused on A2C training."""
         super(ZergAgent, self).step(obs)
         
-        screen_tensor, minimap_tensor = self.preprocess_state(obs)
-        obs_state = self.extract_structured_obs(obs)
-        obs_state_tensor = torch.tensor(obs_state, dtype=torch.float32).unsqueeze(0).to(device)
+        try:
+            with torch.no_grad():
+                # Get structured observations only
+                obs_state = self.extract_full_structured_obs(obs)
+                obs_state_tensor = torch.tensor(obs_state, dtype=torch.float32, device=device)
+                
+                # Forward pass
+                screen_tensor, minimap_tensor = self.preprocess_state(obs)
+                action_logits, _, arg_out = self.model(
+                    screen_tensor,
+                    minimap_tensor,
+                    obs_state_tensor.unsqueeze(0)
+                )
+                
+                # Action selection
+                action_probs = F.softmax(action_logits, dim=1)[0].cpu().numpy()
+                chosen_action_id = np.random.choice(len(action_probs), p=action_probs)
+                
+                if chosen_action_id not in obs.observation["available_actions"]:
+                    chosen_action_id = np.random.choice(obs.observation["available_actions"])
+                
+                # Get counts from player information
+                player_info = obs.observation.player
+                current_worker_count = player_info[7]  # idle worker count
+                current_army_count = player_info[8]    # army count
+                current_base_count = player_info[6]     # base count
+                
+                # Create a current state representation
+                current_state = {
+                    'worker_count': current_worker_count,
+                    'army_count': current_army_count,
+                    'base_count': current_base_count,
+                }
+                
+                # Process action arguments and get reward
+                args, reward = self._process_action_args(chosen_action_id, arg_out, obs)
+                reward = self.compute_reward(obs, current_state, chosen_action_id)  # Call compute_reward
+                
+                # Log the reward for debugging
+                #print(f"Chosen action: {chosen_action_id}, Reward: {reward}")
+                
+                # Ensure reward is a valid number
+                if reward is None:
+                    reward = 0  # Default to 0 if reward is None
+                
+                # Update buffer with simplified state representation
+                self.replay_buffer.append((
+                    screen_tensor,
+                    minimap_tensor,
+                    obs_state_tensor.unsqueeze(0),
+                    chosen_action_id,
+                    reward
+                ))
+                
+                self.total_reward += reward
+                
+                # Log metrics to TensorBoard
+                self.writer.add_scalar("Action/Chosen", chosen_action_id, self.episode_count)
+                self.writer.add_scalar("Action/Count", self.action_count, self.episode_count)
+                
+                return actions.FunctionCall(chosen_action_id, args)
+                
+        except Exception as e:
+            print(f"Error in step: {e}")
+            return actions.FunctionCall(0, [])
+
+    def _perform_training(self):
+        """Separated training logic with optional profiling"""
+        # Initialize GradScaler
+        scaler = GradScaler()
         
-        if obs.observation.game_loop % 500 == 0 or obs.first():
-            # Squeeze out the batch dimension.
-            screen_image = screen_tensor.squeeze(0)
-            minimap_image = minimap_tensor.squeeze(0)
-
-            # Ensure both images are in RGB format (3 x H x W).
-            screen_image_vis = self._to_rgb(screen_image)
-            minimap_image_vis = self._to_rgb(minimap_image)
-
-            # Log images exactly as seen by the model.
-            self.writer.add_image("Screen", (screen_image_vis * 255).byte(), self.episode_count, dataformats='CHW')
-            self.writer.add_image("Minimap", (minimap_image_vis * 255).byte(), self.episode_count, dataformats='CHW')
+        # Only profile every 100 training steps
+        should_profile = (self.training_steps % 100 == 0)
+        profiler = cProfile.Profile() if should_profile else None
         
-        # Forward pass without chosen action to get Q-values and all coordinate predictions.
-        action_logits, _, arg_out = self.model(
-            screen_tensor,
-            minimap_tensor,
-            obs_state_tensor
-        )
-        action_probs = torch.softmax(action_logits, dim=1).cpu().detach().numpy()[0]
-        chosen_action_id = np.random.choice(len(action_probs), p=action_probs)
-        
-        # If the chosen action is not available, pick one from the pool.
-        available_actions = obs.observation["available_actions"]
-        if chosen_action_id not in available_actions:
-            chosen_action_id = np.random.choice(available_actions)
-        
-        # Extract the coordinate prediction from the chosen action’s head.
-        if isinstance(arg_out, dict) and "coord_all" in arg_out:
-            chosen_coord = arg_out["coord_all"][str(chosen_action_id)]
-            screen_xy = chosen_coord.cpu().detach().numpy()[0]
-        else:
-            screen_xy = None
-        
-        # Pre-compute other arguments from network output if available.
-        chosen_queued = None
-        if isinstance(arg_out, dict) and "queued" in arg_out:
-            queued_probs = torch.softmax(arg_out["queued"], dim=1).cpu().detach().numpy()[0]
-            chosen_queued = int(np.random.choice(2, p=queued_probs))
-        
-        minimap_xy = None
-        if isinstance(arg_out, dict) and "minimap" in arg_out:
-            minimap_xy = torch.sigmoid(arg_out["minimap"]).cpu().detach().numpy()[0]
-        
-        # Construct target_coords for replay buffer.
-        if screen_xy is not None:
-            target_coords = torch.tensor(screen_xy, dtype=torch.float32, device=device)
-        else:
-            target_coords = torch.zeros(2, dtype=torch.float32, device=device)
-        
-        # Construct the function call arguments.
-        args = []
-        for arg in self.action_spec[0].functions[chosen_action_id].args:
-            if arg.name == "queued" and chosen_queued is not None:
-                args.append([chosen_queued])
-            elif arg.name == "screen" and screen_xy is not None:
-                x = int(min(max(round(screen_xy[0] * arg.sizes[0]), 0), arg.sizes[0]-1))
-                y = int(min(max(round(screen_xy[1] * arg.sizes[1]), 0), arg.sizes[1]-1))
-                args.append([x, y])
-            elif arg.name == "minimap" and minimap_xy is not None:
-                x = int(min(max(minimap_xy[0] * arg.sizes[0], 0), arg.sizes[0]-1))
-                y = int(min(max(minimap_xy[1] * arg.sizes[1], 0), arg.sizes[1]-1))
-                args.append([x, y])
-            else:
-                rand_args = [np.random.randint(0, size) for size in arg.sizes]
-                args.append(rand_args)
+        try:
+            if should_profile:
+                profiler.enable()
+            
+            batch_size = min(2000, len(self.replay_buffer))
+            training_data = list(self.replay_buffer)[-batch_size:]
+            
+            # Use GradScaler for mixed precision training
+            with torch.amp.autocast('cuda'):
+                loss, policy_loss, value_loss, entropy = a2c_train_step(
+                    self.model,
+                    self.optimizer,
+                    rollout=training_data,
+                    gamma=0.99,
+                    ent_coef=0.01,
+                    vf_coef=0.5,
+                    writer=self.writer
+                )
+            
+            self._log_training_metrics(loss, policy_loss, value_loss, entropy)
+            
+            while len(self.replay_buffer) > MAX_REPLAY_BUFFER_SIZE // 2:
+                self.replay_buffer.popleft()
+            
+            self.training_steps += 1
+            
+            self.writer.add_scalar("Loss/Total", float(loss), self.training_steps)
+            self.writer.add_scalar("Loss/Policy", float(policy_loss), self.training_steps)
+            self.writer.add_scalar("Loss/Value", float(value_loss), self.training_steps)
+            self.writer.add_scalar("Loss/Entropy", float(entropy), self.training_steps)
+            
+        except Exception as e:
+            print(f"Training error: {e}")
+        finally:
+            if should_profile:
+                profiler.disable()
+                stats = pstats.Stats(profiler).sort_stats('cumulative')
+                stats.print_stats()
+            
+            torch.cuda.empty_cache()
 
-        reward = self.compute_reward(obs, obs_state)
-        if obs.last() and obs.reward <= 0:
-            reward = self.episode_reward_accum
-
-        self.total_reward += reward
-        next_state_tensor = screen_tensor.clone().detach()
-        self.replay_buffer.append((screen_tensor, chosen_action_id, reward, next_state_tensor, target_coords))
-        
-        return actions.FunctionCall(chosen_action_id, args)
-
-    # def train_online(self):
-    #     batch = random.sample(self.replay_buffer, self.batch_size)
-    #     states, actions_batch, rewards, next_states, target_coords = zip(*batch)
-    #     states = torch.stack(states)
-    #     actions_batch = torch.tensor(actions_batch, dtype=torch.int64, device=device)
-    #     rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
-    #     next_states = torch.stack(next_states)
-    #     target_coords = torch.stack(target_coords)
-
-    #     noise_std = 0.01
-    #     target_coords = target_coords + torch.randn_like(target_coords) * noise_std
-
-    #     dummy_minimap = torch.zeros(states.size(0), 11, 64, 64, dtype=torch.float32, device=device)
-    #     dummy_obs_state = torch.zeros((states.size(0), 31), dtype=torch.float32, device=device)
-
-    #     # Forward pass without chosen action to get all coordinate predictions.
-    #     q_vals, coord_preds = self.model(states, dummy_minimap, dummy_obs_state, chosen_action=None)
-    #     current_q = q_vals.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
-
-    #     gamma = 0.99
-    #     with torch.no_grad():
-    #         next_q_vals, _ = self.model(next_states, dummy_minimap, dummy_obs_state, chosen_action=None)
-    #         max_next_q, _ = next_q_vals.max(dim=1)
-    #         target_q = rewards + gamma * max_next_q
-
-    #     raw_reward_weights = (rewards - 0.0) / (rewards.max() + 1e-6)
-    #     reward_weights = torch.clamp(raw_reward_weights, 0, 1)
-    #     min_weight = torch.tensor(0.1, device=device)
-    #     reward_weights = torch.max(reward_weights, min_weight)
-        
-    #     # For training, select for each sample the coordinate output corresponding to the stored action.
-    #     if isinstance(coord_preds, dict) and "coord_all" in coord_preds:
-    #         pred_coords_list = []
-    #         for i, a in enumerate(actions_batch):
-    #             # Each head's prediction is batched so pick index i.
-    #             pred = coord_preds["coord_all"][str(a.item())][i]
-    #             pred_coords_list.append(pred)
-    #         pred_coords = torch.stack(pred_coords_list)
-    #     else:
-    #         pred_coords = coord_preds  # fallback
-
-    #     loss_fn = CustomLoss()
-    #     loss, q_loss_value, coord_loss_value = loss_fn(current_q, target_q, pred_coords, target_coords, reward_weights)
-
-    #     # Add auxiliary losses if needed (for unused heads; update as appropriate).
-    #     if isinstance(coord_preds, dict) and "coord_all" in coord_preds:
-    #         for key, head_out in coord_preds["coord_all"].items():
-    #             # For example, add a dummy loss to all heads (or only for heads not corresponding to actions in batch)
-    #             dummy_target = torch.zeros_like(head_out)
-    #             aux_loss = 0.01 * torch.nn.functional.mse_loss(head_out, dummy_target)
-    #             loss += aux_loss
-
-    #     self.optimizer.zero_grad()
-    #     loss.backward()
-    #     for name, param in self.model.named_parameters():
-    #         if param.requires_grad and param.grad is None:
-    #             print(f"WARNING: No gradient for {name}")
-    #         elif param.requires_grad:
-    #             grad_norm = param.grad.data.norm()
-
-    #     self.optimizer.step()
-    #     self.replay_buffer = self.replay_buffer[-1000:]
-    #     self.writer.add_scalar("Loss/Total", loss.item(), self.episode_count)
-    #     self.writer.add_scalar("Loss/Q", q_loss_value.item(), self.episode_count)
-    #     self.writer.add_scalar("Loss/Coord", coord_loss_value.item(), self.episode_count)
-
-    #     # Log histograms of weights and gradients
-    #     for name, param in self.model.named_parameters():
-    #         self.writer.add_histogram(f"Weights/{name}", param, self.episode_count)
-    #         if param.grad is not None:
-    #             self.writer.add_histogram(f"Gradients/{name}", param.grad, self.episode_count)
-    #     gc.collect()
+    def add_to_replay_buffer(self, transition):
+        self.replay_buffer.append(transition)
+        if len(self.replay_buffer) > MAX_REPLAY_BUFFER_SIZE:
+            self.replay_buffer.pop(0)  # Remove oldest transition
 
     def reset(self):
+        """Simplified reset function."""
         super(ZergAgent, self).reset()
         self.episode_rewards.append(self.total_reward)
-        self.writer.add_scalar("Reward/Total", self.total_reward, self.episode_count)
-        self.total_reward = 0
-        self.action_count = 0
+        self.writer.add_scalar("Reward/Total", float(self.total_reward), self.episode_count)
+        self.writer.add_scalar("Episode/Count", float(self.episode_count), self.episode_count)
+        print(f"Episode {self.episode_count} reset. Total reward: {self.total_reward:.2f}")
 
-        if len(self.replay_buffer) >= self.batch_size:
-            # Optionally remove or adjust the call to train_online:
-            # self.train_online()
-            pass
+        # Perform end-of-episode training
+        if len(self.replay_buffer) > 32:
+            try:
+                training_data = list(self.replay_buffer)[-2000:]
+                loss, policy_loss, value_loss, entropy = a2c_train_step(
+                    self.model,
+                    self.optimizer,
+                    rollout=training_data,
+                    gamma=0.99,
+                    ent_coef=0.01,
+                    vf_coef=0.5
+                )
+                
+                # Log metrics - ensure we're dealing with scalar values
+                if loss != 0.0:  # Only log if we actually performed training
+                    self.writer.add_scalar("Loss/Total", float(loss), self.episode_count)
+                    self.writer.add_scalar("Loss/Policy", float(policy_loss), self.episode_count)
+                    self.writer.add_scalar("Loss/Value", float(value_loss), self.episode_count)
+                    self.writer.add_scalar("Loss/Entropy", float(entropy), self.episode_count)
+                
+            except Exception as e:
+                print(f"Training error in reset: {e}")
+                # Don't clear the replay buffer on error, just continue
+                pass
 
-        self.episode_count += 1
+        # Save checkpoint periodically
         if self.episode_count % REFRESH_INTERVAL == 0:
-            ckpt_path = os.path.join(self.checkpoint_dir, f"dueling-{self.agent_name}-episode-{self.episode_count}.pth")
-            torch.save(self.model.state_dict(), ckpt_path)
-            print(f"Saved agent checkpoint: {ckpt_path}")
+            self._save_checkpoint()
 
-        min_epsilon = 0.1
-        decay_rate = 0.99
-        self.epsilon = max(min_epsilon, self.epsilon * decay_rate)
-
-        gc.collect()
+        self.total_reward = 0
+        self.episode_count += 1
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -398,8 +399,16 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         apm = (self.action_count / elapsed_time) * 60
         self.writer.add_scalar("Avg Reward", avg_reward, self.episode_count)
         self.writer.add_scalar("APM", apm, self.episode_count)
-        
-        # Existing plotting code...
+        self.writer.add_scalar("Wins", self.wins, self.episode_count)
+        self.writer.add_scalar("Losses", self.losses, self.episode_count)
+        self.writer.close()
+        print(f"Agent {self.agent_name} completed {self.episode_count} episodes.")
+        print(f"Average reward: {avg_reward:.2f}, APM: {apm:.2f}")
+        print(f"Wins: {self.wins}, Losses: {self.losses}")
+        self.writer.flush()
+        self.plot_rewards()
+
+    def plot_rewards(self):
         try:
             import matplotlib.pyplot as plt
             plt.figure(figsize=(10, 5))
@@ -432,3 +441,113 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
             print(f"Checkpoint loaded from {checkpoint_path}")
         except Exception as e:
             print("Failed to load checkpoint:", e)
+
+    def periodic_cleanup(self):
+        # Clear unnecessary memory
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Trim replay buffer if too large
+        if len(self.replay_buffer) > MAX_REPLAY_BUFFER_SIZE:
+            self.replay_buffer = self.replay_buffer[-MAX_REPLAY_BUFFER_SIZE:]
+
+    def _process_action_args(self, chosen_action_id, arg_out, obs):
+        """Process and construct arguments for the chosen action."""
+        args = []
+        reward = 0  # Initialize reward
+
+        # Extract coordinate prediction if available
+        if isinstance(arg_out, dict) and "coord_all" in arg_out:
+            chosen_coord = arg_out["coord_all"][str(chosen_action_id)]
+            screen_xy = chosen_coord.cpu().detach().numpy()[0]
+        else:
+            screen_xy = None
+        
+        # Extract queued prediction if available
+        chosen_queued = None
+        if isinstance(arg_out, dict) and "queued" in arg_out:
+            queued_probs = torch.softmax(arg_out["queued"], dim=1).cpu().detach().numpy()[0]
+            chosen_queued = int(np.random.choice(2, p=queued_probs))
+        
+        # Extract minimap prediction if available
+        minimap_xy = None
+        if isinstance(arg_out, dict) and "minimap" in arg_out:
+            minimap_coord = arg_out["minimap"][str(chosen_action_id)]
+            minimap_xy = minimap_coord.cpu().detach().numpy()[0]
+        
+        # Construct arguments for each parameter the action requires
+        for arg in self.action_spec[0].functions[chosen_action_id].args:
+            if arg.name == "queued" and chosen_queued is not None:
+                args.append([chosen_queued])
+            elif arg.name == "screen" and screen_xy is not None:
+                x = int(min(max(round(screen_xy[0] * arg.sizes[0]), 0), arg.sizes[0]-1))
+                y = int(min(max(round(screen_xy[1] * arg.sizes[1]), 0), arg.sizes[1]-1))
+                args.append([x, y])
+            elif arg.name == "minimap" and minimap_xy is not None:
+                x = int(min(max(minimap_xy[0] * arg.sizes[0], 0), arg.sizes[0]-1))
+                y = int(min(max(minimap_xy[1] * arg.sizes[1], 0), arg.sizes[1]-1))
+                args.append([x, y])
+            else:
+                # For any other arguments, use random values within the allowed range
+                rand_args = [np.random.randint(0, size) for size in arg.sizes]
+                args.append(rand_args)
+        
+        # Log the chosen action and the constructed arguments
+        #print(f"Chosen action ID: {chosen_action_id}, Args: {args}")
+
+        # Here you should implement the logic to calculate the reward based on the action taken
+        # For example, you might want to check the state of the environment after the action
+        # and assign a reward based on that.
+        # reward = calculate_reward_based_on_action(chosen_action_id, obs)
+
+        return args, reward
+
+    def log_images(self, screen_tensor, minimap_tensor):
+        """Log screen and minimap images to TensorBoard."""
+        try:
+            # Squeeze out the batch dimension if present
+            screen_image = screen_tensor.squeeze(0) if screen_tensor.dim() == 4 else screen_tensor
+            minimap_image = minimap_tensor.squeeze(0) if minimap_tensor.dim() == 4 else minimap_tensor
+
+            # Ensure both images are in RGB format (3 x H x W)
+            screen_image_vis = self._to_rgb(screen_image)
+            minimap_image_vis = self._to_rgb(minimap_image)
+
+            # Convert to bytes format for TensorBoard
+            screen_vis = (screen_image_vis * 255).byte()
+            minimap_vis = (minimap_image_vis * 255).byte()
+
+            # Log images
+            self.writer.add_image('Screen', screen_vis, self.episode_count, dataformats='CHW')
+            self.writer.add_image('Minimap', minimap_vis, self.episode_count, dataformats='CHW')
+            
+        except Exception as e:
+            print(f"Warning: Failed to log images: {e}")
+
+    def _find_latest_checkpoint(self):
+        """Find the latest checkpoint for this agent."""
+        if not os.path.exists(self.checkpoint_dir):
+            return None
+            
+        pattern = re.compile(rf".*{self.agent_name}.*episode-(\d+)\.pth")
+        checkpoints = []
+        for fname in os.listdir(self.checkpoint_dir):
+            match = pattern.match(fname)
+            if match:
+                episode_num = int(match.group(1))
+                checkpoints.append((episode_num, os.path.join(self.checkpoint_dir, fname)))
+                
+        return checkpoints[-1][1] if checkpoints else None
+
+    def _save_checkpoint(self):
+        """Save a checkpoint of the model."""
+        try:
+            checkpoint_path = os.path.join(
+                self.checkpoint_dir,
+                f"dueling-{self.agent_name}-episode-{self.episode_count}.pth"
+            )
+            torch.save(self.model.state_dict(), checkpoint_path)
+            print(f"Saved checkpoint: {checkpoint_path}")
+        except Exception as e:
+            print(f"Failed to save checkpoint: {e}")

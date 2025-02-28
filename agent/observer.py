@@ -9,7 +9,7 @@ from pysc2.lib import actions, features
 from s2clientprotocol import sc2api_pb2 as sc_pb
 from agent.reward_mixin import RewardMixin
 from agent.a2c import create_a2c_model
-
+from agent.config import LR
 class ObserverAgent(RewardMixin, base_agent.BaseAgent):
     """Minimal agent to train an A2C model from replay data."""
 
@@ -23,7 +23,7 @@ class ObserverAgent(RewardMixin, base_agent.BaseAgent):
         self.num_actions = len(actions.FUNCTIONS)
         self.model = create_a2c_model(num_actions=self.num_actions, structured_size=31)
         self._load_checkpoint()
-        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
         self.gamma = 0.99
         self.transitions = []  # Stores (screen, action, reward)
 
@@ -68,44 +68,61 @@ class ObserverAgent(RewardMixin, base_agent.BaseAgent):
         return screen, minimap, structured
 
     def step(self, obs):
-        # Minimal step: process observation, forward pass, select action, and record reward.
         screen, minimap, structured = self.preprocess_obs(obs)
         with torch.no_grad():
             logits, value, _ = self.model(screen, minimap, structured)
             probs = torch.softmax(logits, dim=1)
         action = int(torch.multinomial(probs, 1))
-        reward = self.compute_reward(obs, None)
+        
+        # Ensure current_state is defined properly
+        current_state = {
+            'worker_count': obs.observation.player[7],  # idle worker count
+            'army_count': obs.observation.player[8],    # army count
+            'base_count': obs.observation.player[6],     # base count
+        }
+        
+        reward = self.compute_reward(obs, current_state, action)
         self.reward_accum += reward
         self.transitions.append((screen, action, reward))
         return actions.FunctionCall(action, [])
 
     def finish_episode(self):
-        # Compute return (discounted sum of rewards) for each transition.
         R = 0
         returns = []
         for (_, _, reward) in reversed(self.transitions):
             R = reward + self.gamma * R
             returns.insert(0, R)
         returns = torch.tensor(returns, dtype=torch.float32)
+        
         # Prepare batch of screen observations and actions.
         screens = torch.cat([t[0] for t in self.transitions], dim=0)
         actions_batch = torch.tensor([t[1] for t in self.transitions], dtype=torch.long)
-        # In this minimal update we use dummy inputs for minimap and structured data.
+        
+        # Dummy inputs for minimap and structured data.
         dummy_minimap = torch.zeros(len(self.transitions), 3, 128, 128)
         dummy_structured = torch.zeros(len(self.transitions), 31)
+        
         logits, values, _ = self.model(screens, dummy_minimap, dummy_structured)
         values = values.squeeze(1)
         advantages = returns - values.detach()
         log_probs = torch.log_softmax(logits, dim=1)
         chosen_log_probs = log_probs.gather(1, actions_batch.unsqueeze(1)).squeeze(1)
+        
         policy_loss = - (chosen_log_probs * advantages).mean()
         value_loss = torch.nn.functional.mse_loss(values, returns)
         loss = policy_loss + value_loss
+        
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        
+        # Log metrics to TensorBoard
+        self.writer.add_scalar("Loss/Policy", policy_loss.item(), self.episode_count)
+        self.writer.add_scalar("Loss/Value", value_loss.item(), self.episode_count)
+        self.writer.add_scalar("Reward/Total", self.reward_accum, self.episode_count)
+        
         torch.save(self.model.state_dict(), self.checkpoint_path)
-        print(f"Episode complete. Total reward: {self.reward_accum}, Loss: {loss.item()}")
+        print(f"Episode complete. Total reward: {self.reward_accum:.2f}, Loss: {loss.item():.2f}")
 
     def learn_from_replay(self, replay_path, player_id):
         # Load replay data and (if available) map data.

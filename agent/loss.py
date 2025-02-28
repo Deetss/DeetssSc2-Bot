@@ -14,7 +14,7 @@ class CustomLoss(nn.Module):
         coord_loss_value = (reward_weights * coord_loss_sample).mean()
         
         # Increase the weight of the coordinate loss
-        coord_loss_weight = 50.0  # Increased weight
+        coord_loss_weight = 10.0
         total_loss = q_loss_value + coord_loss_weight * coord_loss_value
 
         # Logging for debugging

@@ -9,3 +9,4 @@ model_checkpoints/*
 q_table.csv
 db/*
 runs/*
+*.pth
