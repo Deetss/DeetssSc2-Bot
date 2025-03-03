@@ -113,7 +113,7 @@ def main(unused_argv):
         p.start()
         processes.append(p)
     for p in processes:
-        p.join(18000)
+        p.join(28000)
         if p.is_alive():
             print("A process is taking too long; terminating it.")
             p.terminate()

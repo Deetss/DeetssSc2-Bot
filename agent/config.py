@@ -26,3 +26,6 @@ GRADIENT_ACCUMULATION_STEPS = 2  # Simulate larger batches
 # Add to agent/config.py
 TRAINING_INTERVAL = 10  # Train less frequently
 USE_JIT = True  # Enable JIT compilation for performance
+
+
+USE_BEST_CHECKPOINT = True  # Use the best checkpoint for evaluation

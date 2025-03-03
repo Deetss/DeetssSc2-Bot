@@ -18,7 +18,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 
-from agent.config import REFRESH_INTERVAL, LR, MAX_REPLAY_BUFFER_SIZE
+from agent.config import REFRESH_INTERVAL, LR, MAX_REPLAY_BUFFER_SIZE, USE_BEST_CHECKPOINT
 
 import cProfile
 import pstats
@@ -28,7 +28,7 @@ import shutil
 
 from memoryUtils import monitor_memory
 
-USE_PRETRAINED = True  # Load a pretrained model if available.
+USE_PRETRAINED = False  # Load a pretrained model if available.
 PRETRAINED_FILENAME = "dueling-Swift_Eagle_3-episode-535.pth"
 #RETRAINED_FILENAME = "observer_dqn_checkpoint.pth"
 
@@ -50,6 +50,7 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         #self.model = create_dueling_model(num_actions=len(actions.FUNCTIONS), structured_size=31)
         self.model = create_a2c_model(num_actions=len(actions.FUNCTIONS), structured_size=31,action_coord_sizes=None)
         self.episode_count = 0  # New counter for episodes
+        self.best_mean_reward = float("-inf")
         
         self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
         self.batch_size = 16
@@ -64,25 +65,35 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         self.start_time = time.time()
         # Initialize TensorBoard SummaryWriter.
         self.writer = SummaryWriter(log_dir=os.path.join("runs", self.agent_name))
-        
+        use_best_ckpt = USE_BEST_CHECKPOINT
+
         # Modified checkpoint loading logic
         if self.use_pretrained:
             if pretrained_filename and os.path.exists(pretrained_filename):
                 print(f"Loading specified checkpoint from {pretrained_filename}")
                 self._load_checkpoint(pretrained_filename)
             else:
-                # Look for latest checkpoint with this agent's name
-                latest_checkpoint = self._find_latest_checkpoint()
-                if latest_checkpoint:
-                    print(f"Loading latest checkpoint: {latest_checkpoint}")
-                    self._load_checkpoint(latest_checkpoint)
-                    # Extract episode number from filename
-                    match = re.search(r'episode-(\d+)', latest_checkpoint)
-                    if match:
-                        self.episode_count = int(match.group(1))
-                    self.epsilon = 0.1  # Reduced exploration for pretrained model
+                if use_best_ckpt:
+                    best_ckpt = self._find_best_checkpoint()
+                    if best_ckpt:
+                        print(f"Loading best checkpoint found: {best_ckpt}")
+                        self._load_checkpoint(best_ckpt)
+                        ...
+                    else:
+                        print("No best checkpoint found; falling back to latest or starting random.")
+                        ...
                 else:
-                    print("No checkpoints found. Starting with a random model.")
+                    latest_checkpoint = self._find_latest_checkpoint()
+                    if latest_checkpoint:
+                        print(f"Loading latest checkpoint: {latest_checkpoint}")
+                        self._load_checkpoint(latest_checkpoint)
+                        # Extract episode number from filename
+                        match = re.search(r'episode-(\d+)', latest_checkpoint)
+                        if match:
+                            self.episode_count = int(match.group(1))
+                        self.epsilon = 0.1  # Reduced exploration for pretrained model
+                    else:
+                        print("No checkpoints found. Starting with a random model.")
         else:
             print("use_pretrained=False. Starting with a random model.")
 
@@ -404,11 +415,60 @@ class ZergAgent(RewardMixin, base_agent.BaseAgent):
         self.writer.add_scalar("Wins", self.wins, self.episode_count)
         self.writer.add_scalar("Losses", self.losses, self.episode_count)
         self.writer.close()
+
+        # Check if this is a new best average reward
+        if avg_reward > self.best_mean_reward:
+            self.best_mean_reward = avg_reward
+
+            self._save_best_checkpoint(avg_reward)
+
         print(f"Agent {self.agent_name} completed {self.episode_count} episodes.")
         print(f"Average reward: {avg_reward:.2f}, APM: {apm:.2f}")
         print(f"Wins: {self.wins}, Losses: {self.losses}")
         self.writer.flush()
         self.plot_rewards()
+
+    def _save_best_checkpoint(self, avg_reward):
+        """
+        Saves a separate checkpoint whenever we exceed the previous best_mean_reward.
+        """
+        try:
+            best_ckpt_filename = (
+                f"best-dueling-{self.agent_name}-"
+                f"episode-{self.episode_count}-reward-{avg_reward:.2f}.pth"
+            )
+            best_ckpt_path = os.path.join(self.checkpoint_dir, best_ckpt_filename)
+            
+            torch.save(self.model.state_dict(), best_ckpt_path)
+            self.best_checkpoint_path = best_ckpt_path
+            print(f"[BEST] New best checkpoint: {best_ckpt_path}, avg_reward={avg_reward:.2f}")
+
+        except Exception as e:
+            print(f"Failed to save best checkpoint: {e}")
+
+    def _find_best_checkpoint(self):
+        """
+        Looks for any file in [self.checkpoint_dir](http://_vscodecontentref_/0) that starts with "best-dueling-{self.agent_name}"
+        and picks the one with the highest reward in the filename.
+        Returns the path if found, else None.
+        """
+        if not os.path.exists(self.checkpoint_dir):
+            return None
+        
+        pattern = re.compile(rf"best-dueling-{self.agent_name}-episode-(\d+)-reward-([\d\.]+)\.pth")
+        best_ckpt = None
+        best_reward_val = float("-inf")
+        
+        for fname in os.listdir(self.checkpoint_dir):
+            match = pattern.match(fname)
+            if match:
+                # Episode num is match.group(1), reward is match.group(2)
+                reward_value = float(match.group(2))
+                if reward_value > best_reward_val:
+                    best_reward_val = reward_value
+                    best_ckpt = os.path.join(self.checkpoint_dir, fname)
+    
+        return best_ckpt
 
     def plot_rewards(self):
         try:

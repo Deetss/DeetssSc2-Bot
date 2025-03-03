@@ -98,6 +98,9 @@ class RewardMixin:
         self.exploration_bonus *= self.exploration_bonus_decay
         self.exploration_bonus = max(self.exploration_bonus, self.exploration_threshold)
 
+        # Initialize step_reward to 0 at the start of the computation
+        step_reward = 0.0
+
         # Check if the action has been taken for the current state
         if current_state_tuple not in self.state_action_history:
             self.state_action_history[current_state_tuple] = set()
@@ -109,17 +112,15 @@ class RewardMixin:
             # Proceed with the action and update history
             self.state_action_history[current_state_tuple].add(action)
 
-        # Initialize step_reward to 0 at the start of the computation
-        step_reward = 0.0
 
         # Compute main reward components
-        step_reward += (diff_score * 0.005
-                        - diff_idle_prod * 0.1
-                        - diff_idle_worker * 0.1
-                        + diff_collected_m * 0.1
-                        + diff_collected_v * 0.15
-                        + diff_killed_units * 0.25
-                        + diff_killed_structs * 0.5
+        step_reward += ( diff_score * (0.001 * (self.episode_step_count / 3000))
+                        - diff_idle_prod * 0.001
+                        - diff_idle_worker * 0.001
+                        + diff_collected_m * 0.001
+                        + diff_collected_v * 0.0025
+                        + diff_killed_units * 2.5
+                        + diff_killed_structs * 5
                         + diff_spent_m * 0.1
                         + diff_spent_v * 0.15)
 
@@ -133,8 +134,8 @@ class RewardMixin:
         # Add sub-goal rewards
         step_reward += worker_reward + expansion_reward + army_reward
 
-        # Add time penalty to encourage faster completion
-        step_reward -= 0.01
+        time_penalty = 0.01 * (1 + (self.episode_step_count / 3000))
+        step_reward -= time_penalty
 
         # Clip rewards to reasonable ranges
         step_reward = max(min(step_reward, 5.0), -5.0)
@@ -165,7 +166,7 @@ class RewardMixin:
     def is_delayed_reward_condition_met(self):
         # Define your condition for delayed rewards here
         # For example, you might check if a certain number of steps have passed
-        return self.episode_step_count > 10  # Example condition
+        return self.episode_step_count > 1200  # Example condition
     
     def calculate_delayed_reward(self):
         # Calculate the delayed reward based on the current state of the game
@@ -177,8 +178,8 @@ class RewardMixin:
         if self.current_state['army_count'] > 10:
             delayed_reward += 2.0  # Reward for having more than 10 army units
 
-        if self.previous_collected_minerals + self.previous_collected_vespene > 1000:
-            delayed_reward += 3.0  # Reward for collecting more than 1000 resources
+        # if self.previous_collected_minerals + self.previous_collected_vespene > 1000:
+        #     delayed_reward += 3.0  # Reward for collecting more than 1000 resources
 
         return delayed_reward
 
