@@ -1,8 +1,8 @@
 import torch
 
 # Global Hyperparameters & Paths
-LR = 3e-5  # try a lower learning rate if higher rate leads to instability
-BATCH_SIZE = 128  # Larger batch size for better GPU utilization
+LR = 5e-5  # try a lower learning rate if higher rate leads to instability
+BATCH_SIZE = 64  # Larger batch size for better GPU utilization
 NUM_EPISODES = 1000
 CHECKPOINT_DIR = "model_checkpoints"
 RUNS_DIR = "runs"
@@ -21,7 +21,7 @@ TENSOR_PRECISION = 'float16' if torch.cuda.is_available() else 'float32'  # Use 
 # Add to agent/config.py
 GRADIENT_CLIP = 0.5
 USE_MIXED_PRECISION = True
-GRADIENT_ACCUMULATION_STEPS = 2  # Simulate larger batches
+GRADIENT_ACCUMULATION_STEPS = 4  # Simulate larger batches
 
 # Add to agent/config.py
 TRAINING_INTERVAL = 10  # Train less frequently
