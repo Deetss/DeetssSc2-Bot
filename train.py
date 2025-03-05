@@ -20,15 +20,12 @@ _original_unpack_rgb_image = features.Feature.unpack_rgb_image
 
 def patched_unpack_rgb_image(plane):
     if plane.bits_per_pixel != 24:
-        # Get dimensions from the plane's shape if available
         try:
-            height, width = plane.size
+            height = plane.size.y
+            width = plane.size.x
         except (AttributeError, ValueError):
-            # Default dimensions if we can't get them from plane
-            height, width = 192, 256  # Match your interface dimensions
-        
-        # Return a dummy RGB image
-        return np.zeros((height, width, 3), dtype=np.uint8)  # Changed from 4 to 3 channels
+            height, width = 192, 256
+        return np.zeros((height, width, 3), dtype=np.uint8)
     return _original_unpack_rgb_image(plane)
 
 features.Feature.unpack_rgb_image = patched_unpack_rgb_image
@@ -46,7 +43,7 @@ def train_agent(worker_id):
             map_name="AbyssalReef",
             players=[
                 sc2_env.Agent(sc2_env.Race.zerg),
-                sc2_env.Bot(sc2_env.Race.random, sc2_env.Difficulty.harder)
+                sc2_env.Bot(sc2_env.Race.random, sc2_env.Difficulty.very_easy)
             ],
             agent_interface_format=features.AgentInterfaceFormat(
                 action_space=actions.ActionSpace.FEATURES,
@@ -92,9 +89,9 @@ def train_agent(worker_id):
 def main(unused_argv):
     # Clear all previous runs at the start of training
     runs_dir = "runs"
-    if os.path.exists(runs_dir):
-        shutil.rmtree(runs_dir)
-    os.makedirs(runs_dir)
+    if not os.path.exists(runs_dir):
+        #shutil.rmtree(runs_dir)
+        os.makedirs(runs_dir)
     
     processes = []
     
@@ -113,10 +110,7 @@ def main(unused_argv):
         p.start()
         processes.append(p)
     for p in processes:
-        p.join(28000)
-        if p.is_alive():
-            print("A process is taking too long; terminating it.")
-            p.terminate()
+        p.join()
     # Ensure all processes are joined and initiate extra garbage collection.
     for p in processes:
         p.join()
